@@ -1,23 +1,28 @@
 # macOS Runtime Guide
 
-This skill intentionally targets macOS only. Linux, Windows, and WSL are out of scope for the first implementation.
+This skill targets macOS 13 or newer. Linux, Windows, and WSL are out of scope for the first implementation.
 
 ## Supported Environment
 
-- macOS Ventura 13 or newer
-- Apple Silicon (`arm64`) or Intel (`x86_64`)
-- Python 3.9 or newer
-- Git 2.30 or newer
+- macOS Ventura 13+
+- Apple Silicon or Intel
+- Python 3.9+
+- Git 2.30+
 - Xcode Command Line Tools
-- Codex CLI with native goal tools
-- A configured GitHub remote with push access
-- A ChatGPT conversation transport and code executor available to Codex
+- Codex CLI with native Goal tools
+- a configured GitHub remote
+- Codex local checkout and command execution
+- ChatGPT conversation transport
+- at least one accepted ChatGPT executor profile
 
-The shell wrappers use `/bin/sh`; all non-trivial logic runs in Python. Homebrew Bash and GNU coreutils are not required.
+Accepted ChatGPT profiles:
 
-Resolve `SKILL_ROOT` to the directory containing the installed `SKILL.md` and run bundled scripts with absolute paths.
+- `local_full`
+- `github_connector`
 
-## Initial Setup
+ChatGPT does not need a local shell when GitHub connector can create a candidate commit and Codex can verify it locally.
+
+## Setup
 
 ```sh
 xcode-select --install
@@ -26,34 +31,45 @@ git --version
 codex --version
 ```
 
-Ensure the selected `python3` is visible in the PATH used by both Codex and launchd.
+Resolve the installed Skill root:
+
+```sh
+SKILL_ROOT="$HOME/.agents/skills/chatgpt-codex-collaboration"
+```
+
+Run bundled scripts with absolute paths.
 
 ## Doctor
 
 ```sh
-SKILL_ROOT="$HOME/.agents/skills/chatgpt-codex-collaboration"
-
 sh "$SKILL_ROOT/scripts/macos-doctor.sh" \
   --repo /absolute/path/to/repository \
   --remote origin
 ```
 
-The doctor checks:
+The doctor verifies the Mac and Codex verifier environment. ChatGPT executor capabilities are verified separately through the runtime capability handshake.
 
-- macOS version and architecture;
-- Python and Git versions;
-- Xcode Command Line Tools;
-- `launchctl`, `osascript`, and `open`;
-- Codex CLI;
-- a usable ChatGPT surface;
-- writable collaboration state;
-- optional repository and GitHub connectivity.
+## Capability State
 
-Runtime-only capabilities are verified by their corresponding gates rather than environment variables alone.
+Save a validated handshake:
+
+```sh
+sh "$SKILL_ROOT/scripts/task-state.sh" set-executor \
+  TASK-001 \
+  --file /path/to/handshake.json
+```
+
+Example handshake:
+
+```text
+$SKILL_ROOT/config/capability-handshake.example.json
+```
+
+Do not start a watcher for `read_only` or `none` profiles.
 
 ## Background Git Watcher
 
-Start a per-task LaunchAgent:
+Start only after capability readiness and task dispatch:
 
 ```sh
 sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
@@ -71,25 +87,40 @@ The LaunchAgent is stored under:
 ~/Library/LaunchAgents/com.backtrue.chatgpt-codex.<task-id>.plist
 ```
 
-Logs are stored under:
+Git watcher logs:
 
 ```text
 ~/.codex/collaboration/logs/
 ```
 
-Git polling behavior:
+The watcher invokes no LLM and backs off from 60 to 300 seconds.
 
-- starts at 60 seconds;
-- progressively backs off after unchanged checks;
-- caps at 300 seconds;
-- emits only state changes and terminal events;
-- invokes no LLM.
+## ChatGPT Terminal Events
+
+The transport adapter writes JSONL events under:
+
+```text
+~/.codex/collaboration/events/<task-id>.jsonl
+```
+
+Example blocker:
+
+```sh
+sh "$SKILL_ROOT/scripts/transport-event.sh" emit \
+  TASK-001 implementation_blocked \
+  --source chatgpt-ui \
+  --code NO_LOCAL_EXECUTOR \
+  --reason "No local checkout or shell is available"
+```
+
+Other terminal events:
+
+- `conversation_completed_no_commit`
+- `conversation_failed`
+- `transport_unreachable`
+- `mode_drifted`
 
 ## Blocking Await
-
-Starting a background watcher alone is not sufficient for low-token waiting when native `/goal` remains active. If the current Codex turn ends, the goal runtime may start another continuation turn.
-
-Immediately after starting the watcher, block the current Codex turn:
 
 ```sh
 sh "$SKILL_ROOT/scripts/macos-watcher.sh" await \
@@ -97,17 +128,14 @@ sh "$SKILL_ROOT/scripts/macos-watcher.sh" await \
   --timeout-seconds 7500
 ```
 
-The await command:
+Await reads both:
 
-- reads only the local watcher output log;
-- performs no GitHub requests;
-- invokes no LLM;
-- keeps the current Codex turn active;
-- returns on candidate commit, lease expiry, interrupt, or watcher failure.
+- local Git watcher output;
+- local ChatGPT transport events.
 
-If the command layer times out while the LaunchAgent is still healthy, run `await` again in the same Codex turn. Do not end the turn with a prose “still waiting” response.
+It performs no GitHub request and invokes no LLM. A terminal ChatGPT event stops the Git watcher and returns control immediately.
 
-If the environment repeatedly enforces very short blocking-command timeouts, enter `BLOCKED_OBSERVATION` rather than allowing an active `/goal` continuation loop. Keep the watcher running and use an authorized `/goal pause` until the workflow can resume safely.
+This prevents both token-heavy `/goal` continuation loops and capability deadlocks.
 
 ## Inspect and Stop
 
@@ -116,20 +144,20 @@ sh "$SKILL_ROOT/scripts/macos-watcher.sh" status TASK-001
 sh "$SKILL_ROOT/scripts/macos-watcher.sh" stop TASK-001
 ```
 
-The completion gate must stop and remove the LaunchAgent.
+The completion and blocker gates must stop and remove the LaunchAgent.
 
 ## macOS Permissions
 
-A fully automated ChatGPT transport may require macOS Automation or Accessibility permission for the terminal, Codex application, browser runtime, or `osascript` adapter.
+A ChatGPT transport adapter may require Automation or Accessibility permission for the terminal, Codex application, browser runtime, or `osascript` adapter.
 
-Grant only the minimum required applications. Do not grant Full Disk Access merely to bypass a failed preflight.
+Grant only the minimum required permission. Do not grant Full Disk Access merely to bypass a failed gate.
 
 ## Known Boundary
 
-The Mac-specific scripts solve operating-system portability, background Git observation, and low-token blocking wait. They do not create the ChatGPT browser adapter or code executor by themselves.
+The repository provides the contracts, state, event channel, watcher, and verifier workflow. A complete installation still needs a ChatGPT transport adapter that can:
 
-The workflow remains `BLOCKED_TRANSPORT` or `BLOCKED_CAPABILITY` until the runtime can:
-
-1. open and inspect the approved ChatGPT conversation;
-2. send a task in Chat mode;
-3. let ChatGPT edit, test, commit, and push the assigned branch.
+1. open the approved conversation;
+2. confirm Chat mode;
+3. send and parse the capability handshake;
+4. send profile-aware task contracts;
+5. emit terminal events from completed ChatGPT responses.
