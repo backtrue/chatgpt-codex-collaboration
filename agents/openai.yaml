@@ -1,4 +1,4 @@
 interface:
   display_name: "ChatGPT-Codex macOS 協作驗收"
-  short_description: "讓 ChatGPT 實作、Codex 驗收，等待時不反覆消耗 goal token"
-  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor 並綁定原生 /goal；每次只把一個有限任務交給 ChatGPT 實作。啟動 launchd Git watcher 後，立即以本機 await 阻塞目前 Codex turn，避免 active /goal 在 idle 狀態反覆啟動 continuation turns。候選 commit 出現後再由 Codex 驗收、退修或回到完整 goal audit。"
+  short_description: "先辨識 ChatGPT 執行能力，再由 Codex 低成本驗收"
+  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor、綁定原生 /goal，並在正式派工前要求 ChatGPT 回傳 capability handshake。依 local_full 或 github_connector profile 建立不同 Task Contract；connector-only 模式允許未測試 candidate，由 Codex 本機執行全部驗證。啟動 watcher 後以本機 await 阻塞目前 turn，並在 ChatGPT 回報 blocker 時透過 transport event 立即停止等待。"
