@@ -1,0 +1,37 @@
+schema_version: "1.0"
+
+executor:
+  type: "local_workspace"
+  workspace_root: "/absolute/path/to/workspaces"
+
+repository:
+  remote: "origin"
+  default_base_branch: "main"
+  branch_prefix: "chatgpt/"
+  allow_existing_checkout: true
+  require_clean_worktree: true
+
+capabilities:
+  read_files: true
+  write_files: true
+  run_commands: true
+  git_commit: true
+  git_push: true
+  browser_preview: false
+  external_network: false
+
+restrictions:
+  allow_force_push: false
+  allow_base_branch_write: false
+  allow_secret_read: false
+  allow_unapproved_files: false
+  allow_package_install: false
+
+paths:
+  task_state_root: "~/.codex/collaboration/tasks"
+  log_root: "~/.codex/collaboration/logs"
+
+observation:
+  lease_seconds: 7200
+  poll_seconds: 30
+  absolute_deadline_seconds: 21600
