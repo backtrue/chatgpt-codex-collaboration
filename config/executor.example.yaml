@@ -1,8 +1,14 @@
-schema_version: "1.0"
+schema_version: "2.0"
+
+target:
+  operating_system: "macOS"
+  minimum_version: "13.0"
 
 executor:
-  type: "local_workspace"
-  workspace_root: "/absolute/path/to/workspaces"
+  type: "macos_local_workspace"
+  workspace_root: "~/Developer/codex-workspaces"
+  python_command: "python3"
+  shell_command: "/bin/sh"
 
 repository:
   remote: "origin"
@@ -10,6 +16,7 @@ repository:
   branch_prefix: "chatgpt/"
   allow_existing_checkout: true
   require_clean_worktree: true
+  prefer_git_worktree: true
 
 capabilities:
   read_files: true
@@ -18,7 +25,7 @@ capabilities:
   git_commit: true
   git_push: true
   browser_preview: false
-  external_network: false
+  external_network: true
 
 restrictions:
   allow_force_push: false
@@ -27,11 +34,21 @@ restrictions:
   allow_unapproved_files: false
   allow_package_install: false
 
-paths:
-  task_state_root: "~/.codex/collaboration/tasks"
-  log_root: "~/.codex/collaboration/logs"
+transport:
+  surface_preference:
+    - "Google Chrome"
+    - "ChatGPT"
+    - "Safari"
+  require_existing_conversation: true
+  require_chat_mode: true
 
-observation:
+watcher:
+  supervisor: "launchd"
+  launch_agent_directory: "~/Library/LaunchAgents"
   lease_seconds: 7200
   poll_seconds: 30
   absolute_deadline_seconds: 21600
+
+paths:
+  task_state_root: "~/.codex/collaboration/tasks"
+  log_root: "~/.codex/collaboration/logs"
