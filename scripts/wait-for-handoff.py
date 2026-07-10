@@ -16,7 +16,12 @@ stop_requested = False
 
 def emit(event: str, task_id: str, branch: str, start_epoch: int, **extra: object) -> None:
     elapsed = max(0, int(time.time()) - start_epoch)
-    fields = [f"event={event}", f"task_id={task_id}", f"branch={branch}", f"elapsed_seconds={elapsed}"]
+    fields = [
+        f"event={event}",
+        f"task_id={task_id}",
+        f"branch={branch}",
+        f"elapsed_seconds={elapsed}",
+    ]
     fields.extend(f"{key}={value}" for key, value in extra.items())
     print(" ".join(fields), flush=True)
 
@@ -46,14 +51,22 @@ def remote_head(remote: str, branch: str) -> tuple[str, str | None]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Wait for a GitHub handoff commit without invoking an LLM")
+    parser = argparse.ArgumentParser(
+        description="Wait for a GitHub handoff commit without invoking an LLM"
+    )
     parser.add_argument("task_id")
     parser.add_argument("branch")
     parser.add_argument("base_sha")
     parser.add_argument("lease_seconds", nargs="?", type=int, default=7200)
-    parser.add_argument("poll_seconds", nargs="?", type=int, default=30)
+    parser.add_argument("poll_seconds", nargs="?", type=int, default=60)
+    parser.add_argument("--max-poll-seconds", type=int, default=300)
+    parser.add_argument("--backoff-after", type=int, default=5)
     parser.add_argument("--remote", default=os.environ.get("REMOTE", "origin"))
-    parser.add_argument("--dispatch-epoch", type=int, default=int(os.environ.get("DISPATCH_EPOCH", time.time())))
+    parser.add_argument(
+        "--dispatch-epoch",
+        type=int,
+        default=int(os.environ.get("DISPATCH_EPOCH", time.time())),
+    )
     args = parser.parse_args()
 
     if not TASK_RE.fullmatch(args.task_id):
@@ -62,22 +75,47 @@ def main() -> int:
     if not SHA_RE.fullmatch(args.base_sha):
         print("error=invalid_base_sha", file=sys.stderr)
         return 2
-    if args.lease_seconds < 1 or args.poll_seconds < 1:
+    if (
+        args.lease_seconds < 1
+        or args.poll_seconds < 1
+        or args.max_poll_seconds < args.poll_seconds
+        or args.backoff_after < 1
+    ):
         print("error=invalid_timing", file=sys.stderr)
         return 2
-    if subprocess.run(["git", "check-ref-format", "--branch", args.branch], capture_output=True).returncode != 0:
+    if (
+        subprocess.run(
+            ["git", "check-ref-format", "--branch", args.branch],
+            capture_output=True,
+        ).returncode
+        != 0
+    ):
         print(f"error=invalid_branch branch={args.branch}", file=sys.stderr)
         return 2
-    if subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True).returncode != 0:
+    if (
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+        ).returncode
+        != 0
+    ):
         print("error=not_a_git_worktree", file=sys.stderr)
         return 2
-    if subprocess.run(["git", "remote", "get-url", args.remote], capture_output=True).returncode != 0:
+    if (
+        subprocess.run(
+            ["git", "remote", "get-url", args.remote],
+            capture_output=True,
+        ).returncode
+        != 0
+    ):
         print(f"error=missing_remote remote={args.remote}", file=sys.stderr)
         return 2
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
     last_state: str | None = None
+    unchanged_polls = 0
+    current_poll_seconds = args.poll_seconds
 
     while not stop_requested:
         elapsed = int(time.time()) - args.dispatch_epoch
@@ -88,14 +126,38 @@ def main() -> int:
         state, head = remote_head(args.remote, args.branch)
         if state == "ok" and head is not None:
             if head.lower() != args.base_sha.lower():
-                emit("handoff_candidate", args.task_id, args.branch, args.dispatch_epoch, sha=head)
+                emit(
+                    "handoff_candidate",
+                    args.task_id,
+                    args.branch,
+                    args.dispatch_epoch,
+                    sha=head,
+                )
                 return 0
             state = "waiting"
 
         if state != last_state:
-            emit(state, args.task_id, args.branch, args.dispatch_epoch)
+            emit(
+                state,
+                args.task_id,
+                args.branch,
+                args.dispatch_epoch,
+                next_poll_seconds=current_poll_seconds,
+            )
             last_state = state
-        time.sleep(args.poll_seconds)
+            unchanged_polls = 0
+            current_poll_seconds = args.poll_seconds
+        else:
+            unchanged_polls += 1
+            if unchanged_polls >= args.backoff_after:
+                current_poll_seconds = min(
+                    args.max_poll_seconds,
+                    max(current_poll_seconds + 1, int(current_poll_seconds * 1.5)),
+                )
+                unchanged_polls = 0
+
+        remaining = args.lease_seconds - (int(time.time()) - args.dispatch_epoch)
+        time.sleep(max(1, min(current_poll_seconds, remaining)))
 
     emit("interrupted", args.task_id, args.branch, args.dispatch_epoch)
     return 130
