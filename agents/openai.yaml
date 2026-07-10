@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChatGPT-Codex 協作驗收"
+  short_description: "讓 ChatGPT 實作、Codex 依 spec 驗收並安全交接"
+  default_prompt: "依照協作流程，先由 ChatGPT 在 Chat 模式實作，再由 Codex 拉回、驗收、退回修正或完成交付。"
