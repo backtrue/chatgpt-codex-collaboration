@@ -125,6 +125,7 @@ def await_event(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + args.timeout_seconds
     offset = 0
     missing_since: float | None = None
+    last_health_check = 0.0
 
     print(
         f"event=await_started task_id={args.task_id} "
@@ -143,23 +144,26 @@ def await_event(args: argparse.Namespace) -> int:
                         return TERMINAL_EVENTS[event]
                 offset = handle.tell()
 
-        loaded = run("launchctl", "print", f"{domain()}/{label}").returncode == 0
-        if loaded or plist.exists():
-            missing_since = None
-        elif missing_since is None:
-            missing_since = time.monotonic()
-        elif time.monotonic() - missing_since >= args.missing_grace_seconds:
-            stderr_tail = ""
-            if stderr_path.exists():
-                stderr_tail = stderr_path.read_text(
-                    encoding="utf-8", errors="replace"
-                )[-2000:]
-            print(
-                f"error=watcher_missing task_id={args.task_id} "
-                f"stderr_tail={stderr_tail!r}",
-                file=sys.stderr,
-            )
-            return 2
+        now = time.monotonic()
+        if now - last_health_check >= args.health_check_seconds:
+            loaded = run("launchctl", "print", f"{domain()}/{label}").returncode == 0
+            last_health_check = now
+            if loaded or plist.exists():
+                missing_since = None
+            elif missing_since is None:
+                missing_since = now
+            elif now - missing_since >= args.missing_grace_seconds:
+                stderr_tail = ""
+                if stderr_path.exists():
+                    stderr_tail = stderr_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )[-2000:]
+                print(
+                    f"error=watcher_missing task_id={args.task_id} "
+                    f"stderr_tail={stderr_tail!r}",
+                    file=sys.stderr,
+                )
+                return 2
 
         time.sleep(args.local_poll_seconds)
 
@@ -203,8 +207,9 @@ def main() -> int:
     a = sub.add_parser("await")
     a.add_argument("task_id")
     a.add_argument("--timeout-seconds", type=int, default=7500)
-    a.add_argument("--local-poll-seconds", type=float, default=2.0)
-    a.add_argument("--missing-grace-seconds", type=float, default=5.0)
+    a.add_argument("--local-poll-seconds", type=float, default=5.0)
+    a.add_argument("--health-check-seconds", type=float, default=30.0)
+    a.add_argument("--missing-grace-seconds", type=float, default=10.0)
     a.set_defaults(func=await_event)
 
     x = sub.add_parser("stop")
