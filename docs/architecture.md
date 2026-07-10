@@ -1,185 +1,221 @@
 # Collaboration Architecture — macOS First
 
 ```text
-Native Codex thread goal (/goal)
+Native Codex /goal
   │
-  │ objective / status / budget / continuation
   ▼
 Codex verifier/orchestrator on macOS
-  ├─ Goal gate: get_goal / create_goal / update_goal
-  ├─ Environment gate: macos-doctor.py
-  ├─ Control plane: approved ChatGPT conversation
-  ├─ State store: ~/.codex/collaboration/tasks/*.json
+  ├─ Environment Gate
+  ├─ Goal Gate
+  ├─ Capability Handshake
+  ├─ Profile-aware Task Contract
+  ├─ State Store: ~/.codex/collaboration/tasks/*.json
   ├─ launchd Git watcher
-  ├─ local blocking await
-  └─ Data plane: assigned GitHub branch
-          ↑
-ChatGPT implementer through the configured macOS executor
+  ├─ Transport Events: ~/.codex/collaboration/events/*.jsonl
+  ├─ Blocking local await
+  └─ Local acceptance runner
+          ▲
+          │ GitHub branch / commit
+          ▼
+ChatGPT implementer
+  ├─ local_full
+  └─ github_connector
 ```
 
-The native Codex thread goal is the only top-level objective authority. This repository manages finite implementation tasks beneath it; it does not create a competing goal planner.
-
-The first supported environment is macOS 13 or newer on Apple Silicon or Intel.
+The native Codex thread goal is the only top-level objective authority. This repository manages finite implementation tasks beneath it.
 
 ## 1. Native Goal Layer
 
-Before task discovery, Codex calls `get_goal`.
+Codex calls `get_goal` before task discovery.
 
-- Active unfinished goal: bind to its `goal_id` and preserve the full objective.
-- No goal or completed goal: create a new active goal from the user's requested end state.
-- Paused, blocked, usage-limited, or budget-limited goal: do not replace it.
-- Conflicting active goal: block rather than silently replace or edit it.
-
-Task state records the goal ID, objective, status, token budget, creation source, and bind time.
-
-After every accepted finite task, Codex audits the complete goal. It calls `update_goal(status="complete")` only when every requirement is proven.
+- Bind an active unfinished goal and preserve its objective.
+- Create a goal only when none exists or the previous goal is complete.
+- Do not replace paused, blocked, usage-limited, budget-limited, or conflicting goals.
+- Audit the full goal after each accepted task.
 
 ## 2. macOS Environment Layer
 
-`macos-doctor.py` verifies:
+`macos-doctor.py` verifies macOS, Python, Git, Xcode Command Line Tools, Codex CLI, launchd, ChatGPT surface, state storage, and optional GitHub connectivity.
 
-- macOS 13+ and supported architecture;
-- Python 3.9+ and Git 2.30+;
-- Xcode Command Line Tools;
-- `launchctl`, `osascript`, and `open`;
-- Codex CLI and a ChatGPT surface;
-- writable collaboration state;
-- repository and GitHub connectivity when provided.
+Codex is the verifier and therefore requires:
 
-Python owns version comparison, JSON output, state, branch polling, and validation. `/bin/sh` is only a thin wrapper. Homebrew Bash and GNU coreutils are not required.
+- a complete local repository checkout;
+- local command execution;
+- access to the assigned remote branch.
 
-## 3. Transport Layer
+The ChatGPT implementer does not always require a local shell.
 
-The control plane sends goal-bound task and repair contracts and observes ChatGPT mode, generation state, completion, and terminal errors.
+## 3. Capability Layer
 
-The data plane carries source code, commits, diffs, and test evidence through GitHub.
+Before implementation dispatch, ChatGPT returns a machine-readable handshake.
 
-Required ChatGPT adapter operations:
+### `local_full`
+
+ChatGPT has local checkout, shell, acceptance commands, commit, and push.
+
+```text
+implementation_validation_policy = implementer_required
+candidate_commit_without_tests = false
+```
+
+### `github_connector`
+
+ChatGPT has repository read/write and branch commit through GitHub connector, but no local checkout or shell.
+
+```text
+implementation_validation_policy = deferred_to_codex
+candidate_commit_without_tests = true
+```
+
+ChatGPT produces a candidate commit and marks unavailable commands `not_run`. Codex runs every required acceptance command locally.
+
+### `read_only` and `none`
+
+No candidate commit can be created. The task enters `BLOCKED_CAPABILITY` before a watcher starts.
+
+The handshake prevents impossible contracts such as requiring local tests from a connector-only executor while also forbidding any remote verification path.
+
+## 4. Control Plane
+
+The control plane opens the approved ChatGPT conversation, verifies Chat mode, sends handshake and task contracts, reads completed responses, and emits terminal transport events.
+
+Required adapter operations:
 
 - `open_conversation(url)`
 - `detect_mode()`
-- `send_message(dispatch_id, message_fingerprint, content)`
+- `send_message(dispatch_id, fingerprint, content)`
 - `detect_generation_state()`
 - `read_last_completed_message()`
+- `parse_capability_handshake()`
+- `emit_transport_event()`
 - `detect_terminal_error()`
 
-The adapter must reject non-Chat modes and duplicate dispatch IDs. UI completion is only a control signal; a remote Git commit is the handoff evidence.
+A completed UI response is not a code handoff. A remote commit is required.
 
-## 4. Execution Layer
+## 5. Data Plane
 
-The executor provides the local macOS worktree where ChatGPT edits code and runs commands.
+GitHub carries:
 
-Lifecycle:
+- assigned branch;
+- base SHA;
+- candidate SHA;
+- changed files;
+- implementer test evidence or `not_run` results;
+- verification status.
 
-1. Resolve a clean checkout or isolated worktree.
-2. Fetch the configured remote.
-3. Create the assigned branch from base SHA.
-4. Restrict writes to allowed paths.
-5. Run task-specific commands.
-6. Commit and push only a candidate handoff.
-7. Return goal ID, commit SHA, changed files, command results, and blockers.
+`pending_codex_verification` is expected for `github_connector` handoffs.
 
-Prohibited behavior includes base-branch writes, force-push, secret reads, unapproved paths, silent package installation, and narrowing the native goal to fit the current task.
+## 6. Execution Layer
 
-## 5. Low-Token Observation Layer
+The implementer lifecycle depends on profile.
 
-### The problem
+### Local full
 
-A Git watcher that runs `git ls-remote` does not itself consume model tokens. The larger risk is native `/goal` continuation.
+1. Resolve local checkout.
+2. Edit allowed paths.
+3. Run implementer-required checks.
+4. Commit and push candidate.
 
-When the goal is active and the Codex thread becomes idle, the goal runtime may start another turn. If the workflow ends each turn with “still waiting,” it can create a repeated model loop.
+### GitHub connector
 
-### Two-layer wait
+1. Read assigned branch through connector.
+2. Edit allowed paths.
+3. Commit candidate through connector.
+4. Mark local commands `not_run`.
+5. Return `pending_codex_verification`.
 
-The workflow therefore uses two distinct processes:
+Prohibited behavior includes base-branch writes, force-push, secret reads, unrelated paths, and claiming acceptance.
+
+## 7. Low-Token Observation Layer
+
+The launchd watcher checks branch HEAD without invoking an LLM. Polling begins at 60 seconds and backs off to 300 seconds.
+
+Codex then blocks the current turn in local `await`, which reads:
+
+1. Git watcher logs; and
+2. ChatGPT transport event JSONL.
+
+This prevents active `/goal` from repeatedly opening continuation turns during an external wait.
+
+## 8. Terminal Transport Event Layer
+
+The adapter writes events under:
 
 ```text
-launchd watcher
-  └─ checks the assigned Git branch
-
-current Codex turn
-  └─ blocks in local await and reads only watcher logs
+~/.codex/collaboration/events/<task-id>.jsonl
 ```
 
-The LaunchAgent:
+Terminal events include:
 
-- runs `wait-for-handoff.py` in the repository working directory;
-- preserves dispatch epoch;
-- writes logs under `~/.codex/collaboration/logs`;
-- starts at 60-second Git polling;
-- progressively backs off after unchanged polls;
-- caps polling at 300 seconds;
-- exits on candidate commit, lease expiry, or interrupt;
-- never invokes an LLM.
+- `implementation_blocked`
+- `conversation_completed_no_commit`
+- `conversation_failed`
+- `transport_unreachable`
+- `mode_drifted`
 
-After starting it, Codex synchronously runs:
+The local await stops the Git watcher and returns immediately when one appears.
 
-```sh
-sh "$SKILL_ROOT/scripts/macos-watcher.sh" await <task-id>
+This prevents the deadlock:
+
+```text
+Implementer cannot create commit
+→ verifier waits only for commit
+→ no terminal condition is observed
 ```
 
-The await process:
-
-- reads only local logs;
-- performs no GitHub requests;
-- invokes no LLM;
-- keeps the current Codex turn active;
-- returns only on a terminal watcher event.
-
-This prevents the thread from becoming idle merely because the external ChatGPT implementation is still running.
-
-If the command runner forces a timeout but the LaunchAgent remains healthy, Codex re-enters await in the same turn. Repeated short command timeouts must not be converted into repeated goal continuation turns.
-
-## 6. Collaboration Task State Machine
+## 9. State Machine
 
 Normal task:
 
-`DISCOVERING → READY → DISPATCHING → IMPLEMENTING → WAITING_HANDOFF → HANDOFF_CANDIDATE → VERIFYING → ACCEPTED`
+```text
+DISCOVERING
+→ CAPABILITY_CHECK
+→ READY
+→ DISPATCHING
+→ IMPLEMENTING
+→ WAITING_HANDOFF
+→ HANDOFF_CANDIDATE
+→ VERIFYING
+→ ACCEPTED
+```
+
+Capability drift:
+
+```text
+WAITING_HANDOFF
+→ implementation_blocked
+→ CAPABILITY_CHECK
+→ github_connector downgrade or BLOCKED_CAPABILITY
+```
 
 Repair:
 
-`VERIFYING → REPAIR_REQUIRED → WAITING_REPAIR → HANDOFF_CANDIDATE → VERIFYING`
+```text
+VERIFYING
+→ REPAIR_REQUIRED
+→ WAITING_REPAIR
+→ HANDOFF_CANDIDATE
+→ VERIFYING
+```
 
-Blocked states:
+Only `VERIFYING` may transition a finite task to `ACCEPTED`.
 
-- `BLOCKED_GOAL`
-- `BLOCKED_SPEC`
-- `BLOCKED_CAPABILITY`
-- `BLOCKED_DEPENDENCY`
-- `BLOCKED_TRANSPORT`
-- `BLOCKED_OBSERVATION`
-- `BLOCKED_USER`
+## 10. Acceptance Layer
 
-Only `VERIFYING` may transition a finite task to `ACCEPTED`. `ACCEPTED` does not change native goal status.
+Codex always performs independent acceptance.
 
-## 7. Dependency Contract
+For `local_full`, Codex reruns focused and required regression checks.
 
-`dependencies.yaml` declares the macOS target, required commands, native goal capabilities, executor capabilities, conditional skills, contracts, and fallbacks.
+For `github_connector`, Codex runs all commands because implementer validation was deferred.
 
-The workflow requires native `get_goal`, `create_goal`, and `update_goal` tools. Missing goal support produces `BLOCKED_GOAL`.
+Acceptance covers spec alignment, changed scope, tests, typecheck, lint, browser behavior, error paths, and security requirements.
 
-Repository-required discovery and acceptance skills must not be silently approximated.
+## 11. Recovery
 
-## 8. Goal-Bound Contracts
-
-The collaboration schema requires:
-
-- parent native goal ID;
-- full goal objective;
-- finite task contribution;
-- goal-bound handoff and acceptance results;
-- evidence of advanced requirements;
-- remaining goal work.
-
-This lets native goal continuation resume from evidence instead of a prose claim.
-
-## Recovery
-
-- Resolve the absolute Skill root before running bundled scripts.
-- Call `get_goal` before loading task state.
-- Resume only when persisted and native goal IDs match.
-- Do not redispatch automatically.
-- Inspect the LaunchAgent and log before creating a new watcher.
-- If a watcher is active, block in local await rather than ending the turn.
-- Preserve original dispatch epoch when recreating a watcher.
-- Enter `BLOCKED_OBSERVATION` when the environment cannot provide a stable low-token wait.
+- Resolve the absolute Skill root.
+- Run Mac Doctor.
+- Read native goal before task state.
+- Restore the saved executor handshake.
+- Do not reuse a profile disproved by a runtime blocker.
+- Read watcher and transport event logs before redispatching.
+- Do not start a watcher before capability readiness.
