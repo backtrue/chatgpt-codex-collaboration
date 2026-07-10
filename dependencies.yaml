@@ -1,4 +1,4 @@
-schema_version: "3.0"
+schema_version: "3.1"
 
 target:
   operating_system: "macOS"
@@ -10,6 +10,20 @@ target:
     - "Linux"
     - "Windows"
     - "WSL"
+
+native_goal_policy:
+  task_blocker_may_mutate_native_goal: false
+  automatic_goal_pause: false
+  automatic_goal_clear: false
+  replace_goal_on_task_failure: false
+  minimum_repeated_native_goal_turns_before_blocked: 3
+  require_no_executor_fallback_before_blocked: true
+  require_complete_goal_blocker_before_blocked: true
+  recovery_from_legacy_blocked_or_paused:
+    preserve_goal_id: true
+    preserve_objective: true
+    require_authorized_resume: true
+    rerun_capability_handshake: true
 
 required:
   commands:
@@ -34,7 +48,7 @@ required:
   verifier_capabilities:
     codex_goal_tools:
       description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
-      missing_behavior: "BLOCKED_GOAL"
+      missing_behavior: "BLOCKED_GOAL_BINDING"
     chatgpt_conversation_access:
       description: "Open, inspect, and send messages to the approved ChatGPT conversation."
       missing_behavior: "BLOCKED_TRANSPORT"
@@ -106,7 +120,7 @@ optional:
   capabilities:
     codex_goal_ui_control:
       purpose: "Allow authorized /goal resume, pause, edit, or clear operations."
-      fallback: "Transition to BLOCKED_GOAL and report the exact required action."
+      fallback: "Report one required user action without mutating the native goal automatically."
     github_webhook:
       purpose: "Wake the verifier when the assigned branch changes."
       fallback: "macOS launchd branch watcher"
