@@ -1,6 +1,6 @@
 ---
 name: chatgpt-codex-collaboration
-description: Coordinate a goal-bound two-agent coding workflow in which ChatGPT performs one scoped implementation task in an existing Chat conversation, pushes the result to GitHub, and Codex verifies it against the authoritative spec before returning control to the native Codex thread goal. Use when implementation and acceptance must be separated, when a user requires ChatGPT to edit code and Codex to validate it, or when a long-running Codex /goal must continue across implementation handoffs.
+description: Coordinate a macOS-first, goal-bound two-agent coding workflow in which ChatGPT performs one scoped implementation task in an existing Chat conversation, pushes the result to GitHub, and Codex verifies it against the authoritative spec before returning control to the native Codex thread goal. Use on macOS when implementation and acceptance must be separated, when a user requires ChatGPT to edit code and Codex to validate it, or when a long-running Codex /goal must continue across implementation handoffs.
 ---
 
 # ChatGPT-Codex Collaboration
@@ -13,7 +13,7 @@ Use this skill to keep implementation and acceptance independent while preservin
 - GitHub is the handoff boundary.
 - The user decides unresolved product behavior and explicit goal changes.
 
-Do not let ChatGPT declare acceptance. Do not let Codex silently implement a failed handoff that was assigned to ChatGPT. Do not create a second competing goal system inside this skill.
+Do not let ChatGPT declare acceptance. Do not let Codex silently implement a failed handoff that was assigned to ChatGPT. Do not create a second competing goal system inside this skill. This first implementation supports macOS 13 or newer only; do not silently fall back to Linux, Windows, WSL, Homebrew Bash, or GNU-only commands.
 
 ## Operational Files
 
@@ -22,15 +22,30 @@ Use the bundled files rather than recreating their behavior from memory:
 - `dependencies.yaml`: required commands, native goal capabilities, conditional skills, and fallbacks.
 - `config/executor.example.yaml`: executor capability and restriction profile.
 - `contracts/collaboration.schema.json`: goal-bound task, repair, event, handoff, acceptance, and task-state contracts.
-- `scripts/check-dependencies.sh`: command dependency check.
-- `scripts/preflight.sh`: repository and execution preflight.
+- `scripts/macos-doctor.sh`: macOS, toolchain, state-store, application-surface, and optional remote diagnostics.
+- `scripts/check-dependencies.sh`: compatibility alias for the macOS doctor.
+- `scripts/preflight.sh`: macOS repository and execution preflight.
 - `scripts/task-state.sh`: persistent state controller and goal binding.
-- `scripts/wait-for-handoff.sh`: token-free branch watcher.
+- `scripts/macos-watcher.sh`: launchd supervisor for token-free branch watchers.
+- `scripts/wait-for-handoff.sh`: direct foreground watcher entrypoint.
 - `scripts/validate-handoff.sh`: remote SHA and changed-scope validation.
-- `docs/architecture.md`: transport, execution, state, dependency, goal, and recovery architecture.
+- `docs/architecture.md`: macOS transport, execution, state, dependency, goal, launchd, and recovery architecture.
 - `docs/goal-integration.md`: native `/goal` binding and continuation rules.
+- `docs/macos.md`: installation, permissions, doctor, and launchd operating guide.
 
 Persist task state outside the repository worktree, normally under `~/.codex/collaboration/tasks`.
+
+## macOS Environment Gate
+
+Run this gate before the Native Codex Goal Gate.
+
+1. Confirm the host is macOS 13 or newer on `arm64` or `x86_64`. Other operating systems are unsupported in this version.
+2. Run `./scripts/macos-doctor.sh --repo <absolute-repo-path> --remote <remote>`.
+3. Treat every doctor failure as a hard block. Do not install packages, grant permissions, or widen filesystem access automatically.
+4. Require Python 3.9+, Git 2.30+, Xcode Command Line Tools, `launchctl`, `osascript`, `open`, Codex CLI, a usable ChatGPT surface, and writable collaboration state storage.
+5. Doctor warnings for native goal tools, ChatGPT transport, and ChatGPT executor are resolved by their corresponding runtime gates. Do not treat an environment-variable declaration as proof of a capability.
+6. Use `/bin/sh` wrappers and the bundled Python scripts. Do not invoke the scripts with `bash`, and do not require GNU coreutils.
+7. If macOS Automation or Accessibility permission is required by the selected ChatGPT adapter, report the exact application and permission. Never request Full Disk Access merely to bypass a failed gate.
 
 ## Native Codex Goal Gate
 
@@ -73,17 +88,17 @@ A prompt cannot override the UI mode. Text saying “stay in Chat mode” is an 
 
 ## Start Gate
 
-After the Native Codex Goal Gate passes:
+After the macOS Environment Gate and Native Codex Goal Gate pass:
 
 1. Inspect `~/.codex/agents/*.toml`, repo-local agent instructions, and the authoritative spec files.
-2. Run `bash scripts/check-dependencies.sh`. Missing required commands or a repo-required conditional skill transitions the task to `BLOCKED_DEPENDENCY`; missing native goal tools is handled by the Goal Gate as `BLOCKED_GOAL`.
+2. Use the completed `macos-doctor.sh` result as the dependency report. Missing local commands or a repo-required conditional skill transitions the task to `BLOCKED_DEPENDENCY`; missing native goal tools is handled by the Goal Gate as `BLOCKED_GOAL`.
 3. Identify the exact spec lines, allowed files, forbidden changes, acceptance commands, and required output fields.
 4. Run `spec-discovery-gate` and `spec-task-audit-list` only when repo-local instructions require them. Do not silently approximate a missing required audit.
 5. Split the next work into one finite implementation task and state how it advances the bound goal. One ChatGPT prompt must map to one task and one acceptance bundle.
 6. Do not send a task when required behavior is not explicit in the spec. Transition to `BLOCKED_SPEC` and ask the user for the missing product decision.
-7. Run `bash scripts/preflight.sh <repo-path> <remote> <branch> [required-command ...]`. Missing execution capability transitions the task to `BLOCKED_CAPABILITY`.
+7. Run `./scripts/preflight.sh <repo-path> <remote> <branch> [required-command ...]`. Missing execution capability transitions the task to `BLOCKED_CAPABILITY`.
 8. Create the assigned remote branch before dispatch and record its current remote HEAD as the handoff base SHA.
-9. Create persistent state with `bash scripts/task-state.sh create ... --goal-id ... --goal-objective ...`, then transition `DISCOVERING → READY → DISPATCHING` as each gate passes.
+9. Create persistent state with `./scripts/task-state.sh create ... --goal-id ... --goal-objective ...`, then transition `DISCOVERING → READY → DISPATCHING` as each gate passes.
 10. Persist the task ID, goal binding, conversation URL, repository, branch, base SHA, dispatch ID, message fingerprint, dispatch time, and observation settings outside the worktree.
 
 ## Implementation Handoff
@@ -116,12 +131,12 @@ Ask ChatGPT to stop rather than guess when it finds a missing spec decision. Do 
 
 A slow implementer is not a failed implementer. Separate waiting from reasoning after the implementation prompt is sent.
 
-1. Start a deterministic handoff watcher for the assigned remote branch. Prefer `bash scripts/wait-for-handoff.sh <task-id> <branch> <base-sha>` or an equivalent transport-level process.
+1. Start a per-task launchd watcher with `./scripts/macos-watcher.sh start <task-id> <branch> <base-sha> --repo <repo-path> --remote <remote> --dispatch-epoch <epoch>`. Use `wait-for-handoff.sh` directly only for foreground diagnostics.
 2. Treat the first remote branch HEAD that differs from the recorded base SHA as a candidate handoff signal. It is not acceptance.
 3. While the watcher is active, Codex must not repeatedly reread the spec, inspect the same page, ask ChatGPT for status, or spend model turns polling.
-4. The watcher may poll GitHub or the transport layer, but it must not call an LLM. It should emit only state changes and terminal events rather than logging every poll.
+4. The LaunchAgent may poll GitHub or the transport layer, but it must not call an LLM. It should emit only state changes and terminal events to `~/.codex/collaboration/logs`.
 5. Use a renewable observation lease instead of a short task timeout. The bundled watcher defaults to a two-hour lease and a 30-second transport poll; repositories may override both values.
-6. Preserve the original dispatch timestamp when restarting a watcher. A shell timeout, browser timeout, lost terminal connection, or watcher restart is not evidence that ChatGPT failed.
+6. Preserve the original dispatch timestamp when recreating a LaunchAgent. Codex turn completion, Terminal closure, browser timeout, or watcher restart is not evidence that ChatGPT failed.
 7. Do not send a status prompt while the ChatGPT response is visibly generating. A status prompt can interrupt or alter the active implementation turn.
 8. Resume Codex reasoning only when one of these events occurs:
    - a candidate handoff commit appears;
@@ -157,7 +172,7 @@ Treat the handoff as incomplete until ChatGPT provides a pushed branch and commi
 
 1. Call `get_goal` and confirm the bound goal still exists, has the same ID, and remains `active`.
 2. Record the candidate SHA and transition `WAITING_HANDOFF` or `WAITING_REPAIR → HANDOFF_CANDIDATE`.
-3. Run `bash scripts/validate-handoff.sh <repo-path> <remote> <branch> <base-sha> <candidate-sha> <allowed-path>...`.
+3. Run `./scripts/validate-handoff.sh <repo-path> <remote> <branch> <base-sha> <candidate-sha> <allowed-path>...`.
 4. Confirm the pushed branch is the assigned branch.
 5. Confirm the candidate is the current remote HEAD and differs from the recorded base SHA.
 6. Confirm changed files stay within the allowed scope.
@@ -202,7 +217,7 @@ Handoff: commit and push the repair branch, then return the commit hash and chan
 Mode constraint: confirm visible Chat mode before working; do not use Work, Task, Scheduled Task, Project, Canvas, or another mode.
 ```
 
-Record the current candidate SHA as the next base SHA, increment repair count with `bash scripts/task-state.sh repair ...`, transition to `WAITING_REPAIR`, start a new watcher, pull the next candidate, and repeat acceptance. Keep the original failure evidence in the task record.
+Record the current candidate SHA as the next base SHA, increment repair count with `./scripts/task-state.sh repair ...`, transition to `WAITING_REPAIR`, recreate the launchd watcher with the new base SHA, pull the next candidate, and repeat acceptance. Keep the original failure evidence in the task record.
 
 Three failed repair attempts are not automatically three native goal turns. Do not call `update_goal(status="blocked")` unless the native goal blocked audit is satisfied: the same blocker must recur across at least three consecutive goal turns and meaningful progress must be impossible without user input or external change.
 
@@ -212,7 +227,7 @@ Three failed repair attempts are not automatically three native goal turns. Do n
 
 After a task reaches `ACCEPTED`:
 
-1. Stop its watcher and persist the accepted SHA.
+1. Stop and remove its LaunchAgent with `./scripts/macos-watcher.sh stop <task-id>`, then persist the accepted SHA.
 2. Call `get_goal` and confirm the same bound goal still exists.
 3. Reassess the full goal against current authoritative evidence:
    - original objective;
@@ -236,8 +251,8 @@ Do not state that no next task was started when an active native goal still has 
 
 ## Recovery and Safe Continuation
 
-- On restart, call `get_goal` before reading persisted task state.
-- If persisted `goal_id` matches the native goal, resume the recorded collaboration state without redispatching.
+- On restart, run the macOS doctor, call `get_goal`, and then read persisted task state.
+- If persisted `goal_id` matches the native goal, inspect `./scripts/macos-watcher.sh status <task-id>` and resume the recorded collaboration state without redispatching.
 - If the user explicitly replaced the goal, rebind only after confirming the new objective and recording the change with `task-state.sh set-goal --allow-rebind`.
 - If the native goal is missing, unexpectedly complete, non-active, or has a different ID, transition to `BLOCKED_GOAL`; do not guess which objective governs the work.
 - Keep one active implementation task at a time unless the user explicitly authorizes parallel work.
