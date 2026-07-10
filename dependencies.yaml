@@ -1,27 +1,49 @@
-schema_version: "1.1"
+schema_version: "2.0"
+
+target:
+  operating_system: "macOS"
+  minimum_version: "13.0"
+  architectures:
+    - "arm64"
+    - "x86_64"
+  unsupported:
+    - "Linux"
+    - "Windows"
+    - "WSL"
 
 required:
   commands:
+    sh:
+      path: "/bin/sh"
+      purpose: "Run thin POSIX-compatible script entrypoints."
+    python3:
+      minimum_version: "3.9"
+      purpose: "Run orchestration, state, doctor, watcher, and validation logic."
     git:
       minimum_version: "2.30"
       purpose: "Inspect repositories, compare commits, and manage handoff branches."
-    bash:
-      minimum_version: "4.0"
-      purpose: "Run deterministic orchestration scripts."
-    python3:
-      minimum_version: "3.9"
-      purpose: "Validate JSON contracts and persist task state."
+    xcode-select:
+      purpose: "Verify Xcode Command Line Tools are configured."
+    launchctl:
+      purpose: "Run handoff watchers as per-user LaunchAgents."
+    osascript:
+      purpose: "Support macOS browser and application automation adapters."
+    open:
+      purpose: "Open the approved ChatGPT conversation surface."
 
   capabilities:
     codex_goal_tools:
       description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
       missing_behavior: "BLOCKED_GOAL"
     chatgpt_conversation_access:
-      description: "Open and interact with the approved existing ChatGPT conversation."
+      description: "Open and interact with the approved existing ChatGPT conversation on macOS."
+      missing_behavior: "BLOCKED_TRANSPORT"
     repository_read:
       description: "Read the repository, agent instructions, and authoritative specifications."
     repository_write:
-      description: "Edit files inside an isolated implementation branch."
+      description: "Edit files inside an isolated local macOS implementation worktree."
+    command_execution:
+      description: "Run task-specific validation commands in the implementation worktree."
     github_push:
       description: "Push the assigned implementation branch to the configured remote."
 
@@ -42,9 +64,10 @@ conditional:
 
 optional:
   commands:
-    jq:
-      minimum_version: "1.6"
-      purpose: "Human-friendly JSON inspection."
+    gh:
+      purpose: "Inspect GitHub authentication and PR or Actions state."
+    brew:
+      purpose: "Install or update Python, Git, and optional browser tooling."
 
   capabilities:
     codex_goal_ui_control:
@@ -52,7 +75,7 @@ optional:
       fallback: "Transition to BLOCKED_GOAL and report the exact required /goal action."
     github_webhook:
       purpose: "Wake the verifier when the assigned branch changes."
-      fallback: "scripts/wait-for-handoff.sh"
-    browser_automation:
-      purpose: "Inspect ChatGPT mode and frontend acceptance surfaces."
-      fallback: "BLOCKED_CAPABILITY when the task requires browser verification"
+      fallback: "macOS launchd branch watcher"
+    browser_preview:
+      purpose: "Verify frontend behavior on required desktop and mobile viewports."
+      fallback: "BLOCKED_CAPABILITY when browser verification is required"
