@@ -1,4 +1,4 @@
 interface:
   display_name: "ChatGPT-Codex macOS 協作驗收"
-  short_description: "先辨識 ChatGPT 執行能力，再由 Codex 低成本驗收"
-  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor、綁定原生 /goal，並在正式派工前要求 ChatGPT 回傳 capability handshake。依 local_full 或 github_connector profile 建立不同 Task Contract；connector-only 模式允許未測試 candidate，由 Codex 本機執行全部驗證。啟動 watcher 後以本機 await 阻塞目前 turn，並在 ChatGPT 回報 blocker 時透過 transport event 立即停止等待。"
+  short_description: "先辨識 ChatGPT 能力，再由 Codex 低成本驗收"
+  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor、綁定原生 /goal，並在正式派工前要求 ChatGPT 回傳 capability handshake。依 local_full 或 github_connector profile 建立不同 Task Contract；connector-only 模式允許未測試 candidate，由 Codex 本機驗證。任何 task-level capability、transport、observation 或 repair blocker 都不得自動把 native /goal 標成 blocked 或 paused；應優先重新握手、降級 profile、重派，並以 transport event 立即停止無效等待。"
