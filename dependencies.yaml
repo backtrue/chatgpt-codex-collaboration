@@ -15,7 +15,7 @@ required:
   capabilities:
     codex_goal_tools:
       description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
-      missing_behavior: "blocked-goal"
+      missing_behavior: "BLOCKED_GOAL"
     chatgpt_conversation_access:
       description: "Open and interact with the approved existing ChatGPT conversation."
     repository_read:
@@ -32,13 +32,13 @@ conditional:
   skills:
     spec-discovery-gate:
       required_when: "The repository workflow declares it in repo-local instructions."
-      missing_behavior: "blocked-dependency"
+      missing_behavior: "BLOCKED_DEPENDENCY"
     spec-task-audit-list:
       required_when: "The repository workflow declares it in repo-local instructions."
-      missing_behavior: "blocked-dependency"
+      missing_behavior: "BLOCKED_DEPENDENCY"
     spec-acceptance-audit:
       required_when: "The repository workflow declares it in repo-local instructions."
-      missing_behavior: "blocked-dependency"
+      missing_behavior: "BLOCKED_DEPENDENCY"
 
 optional:
   commands:
@@ -55,4 +55,4 @@ optional:
       fallback: "scripts/wait-for-handoff.sh"
     browser_automation:
       purpose: "Inspect ChatGPT mode and frontend acceptance surfaces."
-      fallback: "blocked-capability when the task requires browser verification"
+      fallback: "BLOCKED_CAPABILITY when the task requires browser verification"
