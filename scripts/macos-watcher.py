@@ -197,13 +197,14 @@ def await_event(args: argparse.Namespace) -> int:
                     event_type, event = transport_event_from_line(line)
                     if event_type is None:
                         continue
+                    is_terminal = event_type in TRANSPORT_TERMINAL_EVENTS
                     print(
-                        "event=transport_terminal "
-                        f"task_id={args.task_id} event_type={event_type} "
+                        f"event=transport_event task_id={args.task_id} "
+                        f"event_type={event_type} terminal={str(is_terminal).lower()} "
                         f"payload={json.dumps(event.get('payload', {}), ensure_ascii=False)}",
                         flush=True,
                     )
-                    if event_type in TRANSPORT_TERMINAL_EVENTS:
+                    if is_terminal:
                         unload(label, plist)
                         return TRANSPORT_TERMINAL_EVENTS[event_type]
                 transport_offset = handle.tell()
@@ -212,7 +213,7 @@ def await_event(args: argparse.Namespace) -> int:
         if now - last_health_check >= args.health_check_seconds:
             loaded = run("launchctl", "print", f"{domain()}/{label}").returncode == 0
             last_health_check = now
-            if loaded or plist.exists():
+            if loaded:
                 missing_since = None
             elif missing_since is None:
                 missing_since = now
@@ -223,7 +224,8 @@ def await_event(args: argparse.Namespace) -> int:
                         encoding="utf-8", errors="replace"
                     )[-2000:]
                 print(
-                    f"error=watcher_missing task_id={args.task_id} "
+                    f"error=watcher_not_loaded task_id={args.task_id} "
+                    f"plist_exists={str(plist.exists()).lower()} "
                     f"stderr_tail={stderr_tail!r}",
                     file=sys.stderr,
                 )
