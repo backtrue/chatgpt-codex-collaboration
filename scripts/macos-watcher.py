@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -11,14 +12,30 @@ import sys
 import time
 
 TASK_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-TERMINAL_EVENTS = {
+WATCHER_TERMINAL_EVENTS = {
     "handoff_candidate": 0,
     "lease_expired": 124,
     "interrupted": 130,
 }
+TRANSPORT_TERMINAL_EVENTS = {
+    "implementation_blocked": 20,
+    "capability_rejected": 20,
+    "conversation_completed_no_commit": 21,
+    "conversation_failed": 22,
+    "transport_unreachable": 23,
+    "mode_drifted": 24,
+}
 
 
-def paths(task_id: str) -> tuple[str, Path, Path, Path]:
+def event_root() -> Path:
+    root = Path(
+        os.environ.get("COLLAB_EVENT_ROOT", "~/.codex/collaboration/events")
+    ).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def paths(task_id: str) -> tuple[str, Path, Path, Path, Path]:
     safe = re.sub(r"[^A-Za-z0-9._-]", "-", task_id)
     label = f"com.backtrue.chatgpt-codex.{safe}"
     plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -26,7 +43,14 @@ def paths(task_id: str) -> tuple[str, Path, Path, Path]:
         os.environ.get("COLLAB_LOG_ROOT", "~/.codex/collaboration/logs")
     ).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
-    return label, plist, logs / f"{safe}.out.log", logs / f"{safe}.err.log"
+    transport_events = event_root() / f"{safe}.jsonl"
+    return (
+        label,
+        plist,
+        logs / f"{safe}.out.log",
+        logs / f"{safe}.err.log",
+        transport_events,
+    )
 
 
 def domain() -> str:
@@ -44,6 +68,22 @@ def event_from_line(line: str) -> str | None:
     return None
 
 
+def transport_event_from_line(line: str) -> tuple[str | None, dict[str, object]]:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None, {}
+    if not isinstance(event, dict):
+        return None, {}
+    event_type = event.get("event_type")
+    return (event_type if isinstance(event_type, str) else None, event)
+
+
+def unload(label: str, plist: Path) -> None:
+    run("launchctl", "bootout", domain(), str(plist))
+    run("launchctl", "bootout", f"{domain()}/{label}")
+
+
 def start(args: argparse.Namespace) -> int:
     if sys.platform != "darwin":
         print("error=requires_macos", file=sys.stderr)
@@ -51,16 +91,17 @@ def start(args: argparse.Namespace) -> int:
     if not TASK_RE.fullmatch(args.task_id):
         print("error=invalid_task_id", file=sys.stderr)
         return 2
+
     repo = Path(args.repo).expanduser().resolve()
     watcher = Path(__file__).with_name("wait-for-handoff.py").resolve()
     python = Path(sys.executable).resolve()
-    label, plist, stdout_path, stderr_path = paths(args.task_id)
+    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
     plist.parent.mkdir(parents=True, exist_ok=True)
 
-    run("launchctl", "bootout", domain(), str(plist))
-    for log_path in (stdout_path, stderr_path):
+    unload(label, plist)
+    for path in (stdout_path, stderr_path, transport_path):
         try:
-            log_path.unlink()
+            path.unlink()
         except FileNotFoundError:
             pass
 
@@ -104,16 +145,19 @@ def start(args: argparse.Namespace) -> int:
     run("launchctl", "kickstart", "-k", f"{domain()}/{label}")
     print(
         f"event=watcher_started task_id={args.task_id} "
-        f"label={label} plist={plist}"
+        f"label={label} plist={plist} transport_events={transport_path}"
     )
     return 0
 
 
 def status(args: argparse.Namespace) -> int:
-    label, plist, stdout_path, stderr_path = paths(args.task_id)
+    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
     result = run("launchctl", "print", f"{domain()}/{label}")
     print(result.stdout if result.returncode == 0 else result.stderr, end="")
-    print(f"plist={plist}\nstdout={stdout_path}\nstderr={stderr_path}")
+    print(
+        f"plist={plist}\nstdout={stdout_path}\nstderr={stderr_path}"
+        f"\ntransport_events={transport_path}"
+    )
     return result.returncode
 
 
@@ -121,9 +165,11 @@ def await_event(args: argparse.Namespace) -> int:
     if sys.platform != "darwin":
         print("error=requires_macos", file=sys.stderr)
         return 2
-    label, plist, stdout_path, stderr_path = paths(args.task_id)
+
+    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
     deadline = time.monotonic() + args.timeout_seconds
-    offset = 0
+    watcher_offset = 0
+    transport_offset = 0
     missing_since: float | None = None
     last_health_check = 0.0
 
@@ -136,13 +182,31 @@ def await_event(args: argparse.Namespace) -> int:
     while time.monotonic() < deadline:
         if stdout_path.exists():
             with stdout_path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(offset)
+                handle.seek(watcher_offset)
                 for line in handle:
                     print(line.rstrip("\n"), flush=True)
                     event = event_from_line(line)
-                    if event in TERMINAL_EVENTS:
-                        return TERMINAL_EVENTS[event]
-                offset = handle.tell()
+                    if event in WATCHER_TERMINAL_EVENTS:
+                        return WATCHER_TERMINAL_EVENTS[event]
+                watcher_offset = handle.tell()
+
+        if transport_path.exists():
+            with transport_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(transport_offset)
+                for line in handle:
+                    event_type, event = transport_event_from_line(line)
+                    if event_type is None:
+                        continue
+                    print(
+                        "event=transport_terminal "
+                        f"task_id={args.task_id} event_type={event_type} "
+                        f"payload={json.dumps(event.get('payload', {}), ensure_ascii=False)}",
+                        flush=True,
+                    )
+                    if event_type in TRANSPORT_TERMINAL_EVENTS:
+                        unload(label, plist)
+                        return TRANSPORT_TERMINAL_EVENTS[event_type]
+                transport_offset = handle.tell()
 
         now = time.monotonic()
         if now - last_health_check >= args.health_check_seconds:
@@ -176,8 +240,8 @@ def await_event(args: argparse.Namespace) -> int:
 
 
 def stop(args: argparse.Namespace) -> int:
-    label, plist, _stdout_path, _stderr_path = paths(args.task_id)
-    run("launchctl", "bootout", domain(), str(plist))
+    label, plist, _stdout_path, _stderr_path, _transport_path = paths(args.task_id)
+    unload(label, plist)
     if plist.exists() and not args.keep_plist:
         plist.unlink()
     print(f"event=watcher_stopped task_id={args.task_id} label={label}")
@@ -188,34 +252,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Manage macOS launchd handoff watchers")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("start")
-    s.add_argument("task_id")
-    s.add_argument("branch")
-    s.add_argument("base_sha")
-    s.add_argument("--repo", required=True)
-    s.add_argument("--remote", default="origin")
-    s.add_argument("--lease-seconds", type=int, default=7200)
-    s.add_argument("--poll-seconds", type=int, default=60)
-    s.add_argument("--max-poll-seconds", type=int, default=300)
-    s.add_argument("--dispatch-epoch", type=int, default=int(time.time()))
-    s.set_defaults(func=start)
+    start_parser = sub.add_parser("start")
+    start_parser.add_argument("task_id")
+    start_parser.add_argument("branch")
+    start_parser.add_argument("base_sha")
+    start_parser.add_argument("--repo", required=True)
+    start_parser.add_argument("--remote", default="origin")
+    start_parser.add_argument("--lease-seconds", type=int, default=7200)
+    start_parser.add_argument("--poll-seconds", type=int, default=60)
+    start_parser.add_argument("--max-poll-seconds", type=int, default=300)
+    start_parser.add_argument("--dispatch-epoch", type=int, default=int(time.time()))
+    start_parser.set_defaults(func=start)
 
-    st = sub.add_parser("status")
-    st.add_argument("task_id")
-    st.set_defaults(func=status)
+    status_parser = sub.add_parser("status")
+    status_parser.add_argument("task_id")
+    status_parser.set_defaults(func=status)
 
-    a = sub.add_parser("await")
-    a.add_argument("task_id")
-    a.add_argument("--timeout-seconds", type=int, default=7500)
-    a.add_argument("--local-poll-seconds", type=float, default=5.0)
-    a.add_argument("--health-check-seconds", type=float, default=30.0)
-    a.add_argument("--missing-grace-seconds", type=float, default=10.0)
-    a.set_defaults(func=await_event)
+    await_parser = sub.add_parser("await")
+    await_parser.add_argument("task_id")
+    await_parser.add_argument("--timeout-seconds", type=int, default=7500)
+    await_parser.add_argument("--local-poll-seconds", type=float, default=5.0)
+    await_parser.add_argument("--health-check-seconds", type=float, default=30.0)
+    await_parser.add_argument("--missing-grace-seconds", type=float, default=10.0)
+    await_parser.set_defaults(func=await_event)
 
-    x = sub.add_parser("stop")
-    x.add_argument("task_id")
-    x.add_argument("--keep-plist", action="store_true")
-    x.set_defaults(func=stop)
+    stop_parser = sub.add_parser("stop")
+    stop_parser.add_argument("task_id")
+    stop_parser.add_argument("--keep-plist", action="store_true")
+    stop_parser.set_defaults(func=stop)
 
     args = parser.parse_args()
     return args.func(args)
