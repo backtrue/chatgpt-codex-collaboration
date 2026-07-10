@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "3.0"
 
 target:
   operating_system: "macOS"
@@ -18,37 +18,71 @@ required:
       purpose: "Run thin POSIX-compatible script entrypoints."
     python3:
       minimum_version: "3.9"
-      purpose: "Run orchestration, state, doctor, watcher, and validation logic."
+      purpose: "Run orchestration, state, watcher, event, and validation logic."
     git:
       minimum_version: "2.30"
-      purpose: "Inspect repositories, compare commits, and manage handoff branches."
+      purpose: "Inspect repositories, compare commits, and verify handoff branches."
     xcode-select:
       purpose: "Verify Xcode Command Line Tools are configured."
     launchctl:
       purpose: "Run handoff watchers as per-user LaunchAgents."
     osascript:
-      purpose: "Support macOS browser and application automation adapters."
+      purpose: "Support macOS ChatGPT transport adapters."
     open:
       purpose: "Open the approved ChatGPT conversation surface."
 
-  capabilities:
+  verifier_capabilities:
     codex_goal_tools:
       description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
       missing_behavior: "BLOCKED_GOAL"
     chatgpt_conversation_access:
-      description: "Open and interact with the approved existing ChatGPT conversation on macOS."
+      description: "Open, inspect, and send messages to the approved ChatGPT conversation."
       missing_behavior: "BLOCKED_TRANSPORT"
-    repository_read:
-      description: "Read the repository, agent instructions, and authoritative specifications."
-    repository_write:
-      description: "Edit files inside an isolated local macOS implementation worktree."
-    command_execution:
-      description: "Run task-specific validation commands in the implementation worktree."
-    github_push:
-      description: "Push the assigned implementation branch to the configured remote."
+    local_repository_checkout:
+      description: "Codex can read the complete repository locally."
+      missing_behavior: "BLOCKED_CAPABILITY"
+    local_command_execution:
+      description: "Codex can run the required acceptance commands locally."
+      missing_behavior: "BLOCKED_CAPABILITY"
+    github_read:
+      description: "Codex can fetch and inspect the assigned remote branch."
+      missing_behavior: "BLOCKED_TRANSPORT"
+
+  implementer_minimum_capabilities:
+    repository_read: true
+    repository_write: true
+    git_commit: true
+    git_push: true
+    accepted_profiles:
+      - "local_full"
+      - "github_connector"
+    rejected_profiles:
+      - "read_only"
+      - "none"
 
   contracts:
     collaboration: "contracts/collaboration.schema.json"
+
+executor_profiles:
+  local_full:
+    description: "ChatGPT has a local checkout, shell, test runner, commit, and push access."
+    implementation_validation_policy: "implementer_required"
+    candidate_commit_without_tests: false
+    verifier_behavior: "Re-run focused acceptance and required regression checks independently."
+
+  github_connector:
+    description: "ChatGPT can edit and commit through GitHub connector but has no local shell or test runner."
+    implementation_validation_policy: "deferred_to_codex"
+    candidate_commit_without_tests: true
+    verifier_behavior: "Codex must fetch the candidate and run every required acceptance command locally before acceptance."
+
+  read_only:
+    description: "ChatGPT can inspect but cannot create a candidate commit."
+    missing_behavior: "BLOCKED_CAPABILITY"
+
+  none:
+    description: "ChatGPT has no usable repository executor."
+    missing_behavior: "BLOCKED_CAPABILITY"
 
 conditional:
   skills:
@@ -65,17 +99,17 @@ conditional:
 optional:
   commands:
     gh:
-      purpose: "Inspect GitHub authentication and PR or Actions state."
+      purpose: "Inspect GitHub authentication and CI state."
     brew:
-      purpose: "Install or update Python, Git, and optional browser tooling."
+      purpose: "Install or update local macOS tooling."
 
   capabilities:
     codex_goal_ui_control:
-      purpose: "Allow user/system-authorized /goal resume, pause, edit, or clear operations."
-      fallback: "Transition to BLOCKED_GOAL and report the exact required /goal action."
+      purpose: "Allow authorized /goal resume, pause, edit, or clear operations."
+      fallback: "Transition to BLOCKED_GOAL and report the exact required action."
     github_webhook:
       purpose: "Wake the verifier when the assigned branch changes."
       fallback: "macOS launchd branch watcher"
     browser_preview:
-      purpose: "Verify frontend behavior on required desktop and mobile viewports."
+      purpose: "Verify frontend behavior on required viewports."
       fallback: "BLOCKED_CAPABILITY when browser verification is required"
