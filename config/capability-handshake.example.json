@@ -1,0 +1,16 @@
+{
+  "schema_version": "2.0",
+  "status": "ready",
+  "executor_profile": "github_connector",
+  "repository_read": true,
+  "repository_write": true,
+  "local_checkout": false,
+  "shell": false,
+  "git_commit": true,
+  "git_push": true,
+  "external_network": false,
+  "can_run_acceptance": false,
+  "blocker_code": null,
+  "blocker_detail": null,
+  "observed_at": "2026-07-11T00:00:00Z"
+}
