@@ -13,7 +13,7 @@ This skill intentionally targets macOS only. Linux, Windows, and WSL are out of 
 - A configured GitHub remote with push access
 - A ChatGPT conversation transport and code executor available to Codex
 
-The orchestration scripts use `/bin/sh` only as a thin entrypoint. All non-trivial logic runs in Python, so Homebrew Bash and GNU coreutils are not required.
+The orchestration scripts use `/bin/sh` only as a thin entrypoint. All non-trivial logic runs in Python, so Homebrew Bash and GNU coreutils are not required. Invoke the checked-in wrappers with `sh scripts/...`; executable file mode is not assumed.
 
 ## Initial Setup
 
@@ -33,7 +33,7 @@ When Python 3.9+ is missing, install it with Homebrew or pyenv. Ensure the selec
 Run before using the skill:
 
 ```sh
-./scripts/macos-doctor.sh --repo /absolute/path/to/repository
+sh scripts/macos-doctor.sh --repo /absolute/path/to/repository
 ```
 
 The doctor checks:
@@ -55,7 +55,7 @@ For an installation test that requires explicit runtime declarations:
 COLLAB_NATIVE_GOAL_TOOLS=available \
 COLLAB_CHATGPT_TRANSPORT=available \
 COLLAB_CHATGPT_EXECUTOR=available \
-./scripts/macos-doctor.sh --strict-runtime --repo /absolute/path/to/repository
+sh scripts/macos-doctor.sh --strict-runtime --repo /absolute/path/to/repository
 ```
 
 Only set these declarations after the corresponding capability actually exists.
@@ -65,7 +65,7 @@ Only set these declarations after the corresponding capability actually exists.
 Use the macOS watcher manager instead of leaving a terminal loop running:
 
 ```sh
-./scripts/macos-watcher.sh start TASK-001 chatgpt/TASK-001 <base-sha> \
+sh scripts/macos-watcher.sh start TASK-001 chatgpt/TASK-001 <base-sha> \
   --repo /absolute/path/to/repository \
   --remote origin \
   --dispatch-epoch <unix-epoch>
@@ -86,8 +86,8 @@ Logs are written under:
 Inspect or stop it with:
 
 ```sh
-./scripts/macos-watcher.sh status TASK-001
-./scripts/macos-watcher.sh stop TASK-001
+sh scripts/macos-watcher.sh status TASK-001
+sh scripts/macos-watcher.sh stop TASK-001
 ```
 
 The watcher does not invoke an LLM. It polls only the assigned Git remote branch and exits when a candidate commit appears, the observation lease expires, or it is stopped.
