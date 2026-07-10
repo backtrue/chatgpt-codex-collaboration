@@ -61,7 +61,7 @@ Ask ChatGPT to stop rather than guess when it finds a missing spec decision. Do 
 
 A slow implementer is not a failed implementer. Separate waiting from reasoning after the implementation prompt is sent.
 
-1. Start a deterministic handoff watcher for the assigned remote branch. Prefer `scripts/wait-for-handoff.sh <task-id> <branch> <base-sha>` or an equivalent transport-level process.
+1. Start a deterministic handoff watcher for the assigned remote branch. Prefer `bash scripts/wait-for-handoff.sh <task-id> <branch> <base-sha>` or an equivalent transport-level process.
 2. Treat the first remote branch HEAD that differs from the recorded base SHA as a candidate handoff signal. It is not acceptance.
 3. While the watcher is active, Codex must not repeatedly reread the spec, inspect the same page, ask ChatGPT for status, or spend model turns polling.
 4. The watcher may poll GitHub or the transport layer, but it must not call an LLM. It should emit only state changes and terminal events rather than logging every poll.
