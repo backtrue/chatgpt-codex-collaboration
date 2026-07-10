@@ -47,8 +47,8 @@ required:
 
   verifier_capabilities:
     codex_goal_tools:
-      description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
-      missing_behavior: "BLOCKED_GOAL_BINDING"
+      description: "Expose get_goal, create_goal, and update_goal for the current Codex thread. BLOCKED_GOAL is task-local and must not mutate native goal status."
+      missing_behavior: "BLOCKED_GOAL"
     chatgpt_conversation_access:
       description: "Open, inspect, and send messages to the approved ChatGPT conversation."
       missing_behavior: "BLOCKED_TRANSPORT"
