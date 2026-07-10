@@ -1,4 +1,4 @@
-schema_version: "1.0"
+schema_version: "1.1"
 
 required:
   commands:
@@ -13,6 +13,9 @@ required:
       purpose: "Validate JSON contracts and persist task state."
 
   capabilities:
+    codex_goal_tools:
+      description: "Expose get_goal, create_goal, and update_goal for the current Codex thread."
+      missing_behavior: "blocked-goal"
     chatgpt_conversation_access:
       description: "Open and interact with the approved existing ChatGPT conversation."
     repository_read:
@@ -42,7 +45,11 @@ optional:
     jq:
       minimum_version: "1.6"
       purpose: "Human-friendly JSON inspection."
+
   capabilities:
+    codex_goal_ui_control:
+      purpose: "Allow user/system-authorized /goal resume, pause, edit, or clear operations."
+      fallback: "Transition to BLOCKED_GOAL and report the exact required /goal action."
     github_webhook:
       purpose: "Wake the verifier when the assigned branch changes."
       fallback: "scripts/wait-for-handoff.sh"
