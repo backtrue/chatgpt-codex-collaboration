@@ -1,4 +1,4 @@
 interface:
   display_name: "ChatGPT-Codex macOS 協作驗收"
-  short_description: "在 Mac 上讓 ChatGPT 實作、Codex 驗收並持續追蹤原生 /goal"
-  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor，再檢查目前 Codex thread 的原生 /goal；若不存在就依使用者要求建立，若存在就綁定並沿著完整 objective 推進。每次只把一個有限任務交給 ChatGPT 實作，以 launchd 等待 GitHub handoff；Codex 驗收後回到原生 goal audit，未完成就保持 active 並繼續。"
+  short_description: "讓 ChatGPT 實作、Codex 驗收，等待時不反覆消耗 goal token"
+  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor 並綁定原生 /goal；每次只把一個有限任務交給 ChatGPT 實作。啟動 launchd Git watcher 後，立即以本機 await 阻塞目前 Codex turn，避免 active /goal 在 idle 狀態反覆啟動 continuation turns。候選 commit 出現後再由 Codex 驗收、退修或回到完整 goal audit。"
