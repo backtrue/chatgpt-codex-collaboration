@@ -49,7 +49,8 @@ watcher:
   initial_poll_seconds: 60
   max_poll_seconds: 300
   backoff_after_unchanged_polls: 5
-  local_await_poll_seconds: 2
+  local_await_poll_seconds: 5
+  local_await_health_check_seconds: 30
   local_await_timeout_seconds: 7500
   keep_codex_turn_active_while_waiting: true
   absolute_deadline_seconds: 21600
