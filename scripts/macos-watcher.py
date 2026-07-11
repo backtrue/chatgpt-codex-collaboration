@@ -7,24 +7,12 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import time
 
 TASK_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-WATCHER_TERMINAL_EVENTS = {
-    "handoff_candidate": 0,
-    "lease_expired": 124,
-    "interrupted": 130,
-}
-TRANSPORT_TERMINAL_EVENTS = {
-    "implementation_blocked": 20,
-    "capability_rejected": 20,
-    "conversation_completed_no_commit": 21,
-    "conversation_failed": 22,
-    "transport_unreachable": 23,
-    "mode_drifted": 24,
-}
 
 
 def event_root() -> Path:
@@ -35,7 +23,15 @@ def event_root() -> Path:
     return root
 
 
-def paths(task_id: str) -> tuple[str, Path, Path, Path, Path]:
+def wake_root() -> Path:
+    root = Path(
+        os.environ.get("COLLAB_WAKE_ROOT", "~/.codex/collaboration/wakes")
+    ).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def paths(task_id: str) -> tuple[str, Path, Path, Path, Path, Path]:
     safe = re.sub(r"[^A-Za-z0-9._-]", "-", task_id)
     label = f"com.backtrue.chatgpt-codex.{safe}"
     plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -43,13 +39,13 @@ def paths(task_id: str) -> tuple[str, Path, Path, Path, Path]:
         os.environ.get("COLLAB_LOG_ROOT", "~/.codex/collaboration/logs")
     ).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
-    transport_events = event_root() / f"{safe}.jsonl"
     return (
         label,
         plist,
         logs / f"{safe}.out.log",
         logs / f"{safe}.err.log",
-        transport_events,
+        event_root() / f"{safe}.jsonl",
+        wake_root() / f"{safe}.json",
     )
 
 
@@ -57,31 +53,68 @@ def domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, check=False)
-
-
-def event_from_line(line: str) -> str | None:
-    for field in line.strip().split():
-        if field.startswith("event="):
-            return field.split("=", 1)[1]
-    return None
-
-
-def transport_event_from_line(line: str) -> tuple[str | None, dict[str, object]]:
-    try:
-        event = json.loads(line)
-    except json.JSONDecodeError:
-        return None, {}
-    if not isinstance(event, dict):
-        return None, {}
-    event_type = event.get("event_type")
-    return (event_type if isinstance(event_type, str) else None, event)
+def run(*args: str, cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
 
 
 def unload(label: str, plist: Path) -> None:
     run("launchctl", "bootout", domain(), str(plist))
     run("launchctl", "bootout", f"{domain()}/{label}")
+
+
+def resolve_codex(explicit: str | None) -> str | None:
+    candidate = explicit or shutil.which("codex")
+    if not candidate:
+        return None
+    return str(Path(candidate).expanduser().resolve())
+
+
+def goal_control(
+    skill_root: Path,
+    thread_id: str,
+    status: str,
+    repo: Path,
+    codex: str,
+) -> subprocess.CompletedProcess[str]:
+    return run(
+        "sh",
+        str(skill_root / "scripts" / "codex-goal-control.sh"),
+        "set",
+        thread_id,
+        status,
+        "--cwd",
+        str(repo),
+        "--codex",
+        codex,
+        cwd=repo,
+        timeout=40,
+    )
+
+
+def prepare_branch(
+    skill_root: Path,
+    repo: Path,
+    remote: str,
+    branch: str,
+    base_sha: str,
+) -> subprocess.CompletedProcess[str]:
+    return run(
+        "sh",
+        str(skill_root / "scripts" / "prepare-handoff-branch.sh"),
+        str(repo),
+        remote,
+        branch,
+        base_sha,
+        cwd=repo,
+        timeout=150,
+    )
 
 
 def start(args: argparse.Namespace) -> int:
@@ -92,11 +125,38 @@ def start(args: argparse.Namespace) -> int:
         print("error=invalid_task_id", file=sys.stderr)
         return 2
 
+    thread_id = args.thread_id or os.environ.get("CODEX_THREAD_ID")
+    if not thread_id:
+        print("error=missing_codex_thread_id", file=sys.stderr)
+        return 2
+
     repo = Path(args.repo).expanduser().resolve()
-    watcher = Path(__file__).with_name("wait-for-handoff.py").resolve()
+    skill_root = Path(__file__).resolve().parent.parent
+    supervisor = skill_root / "scripts" / "event-supervisor.py"
     python = Path(sys.executable).resolve()
-    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
+    codex = resolve_codex(args.codex)
+    if codex is None:
+        print("error=codex_not_found", file=sys.stderr)
+        return 2
+
+    label, plist, stdout_path, stderr_path, transport_path, config_path = paths(
+        args.task_id
+    )
     plist.parent.mkdir(parents=True, exist_ok=True)
+
+    prepared = prepare_branch(
+        skill_root, repo, args.remote, args.branch, args.base_sha
+    )
+    if prepared.returncode != 0:
+        detail = (prepared.stderr or prepared.stdout).strip()
+        print(f"error=handoff_branch_not_ready detail={detail}", file=sys.stderr)
+        return 2
+
+    paused = goal_control(skill_root, thread_id, "paused", repo, codex)
+    if paused.returncode != 0:
+        detail = (paused.stderr or paused.stdout).strip()
+        print(f"error=native_goal_pause_failed detail={detail}", file=sys.stderr)
+        return 2
 
     unload(label, plist)
     for path in (stdout_path, stderr_path, transport_path):
@@ -105,153 +165,161 @@ def start(args: argparse.Namespace) -> int:
         except FileNotFoundError:
             pass
 
+    program_arguments = [
+        str(python),
+        str(supervisor),
+        args.task_id,
+        args.branch,
+        args.base_sha,
+        thread_id,
+        "--repo",
+        str(repo),
+        "--remote",
+        args.remote,
+        "--skill-root",
+        str(skill_root),
+        "--transport-events",
+        str(transport_path),
+        "--lease-seconds",
+        str(args.lease_seconds),
+        "--poll-seconds",
+        str(args.poll_seconds),
+        "--max-poll-seconds",
+        str(args.max_poll_seconds),
+        "--dispatch-epoch",
+        str(args.dispatch_epoch),
+        "--codex",
+        codex,
+    ]
+
     data = {
         "Label": label,
-        "ProgramArguments": [
-            str(python),
-            str(watcher),
-            args.task_id,
-            args.branch,
-            args.base_sha,
-            str(args.lease_seconds),
-            str(args.poll_seconds),
-            "--max-poll-seconds",
-            str(args.max_poll_seconds),
-            "--remote",
-            args.remote,
-            "--dispatch-epoch",
-            str(args.dispatch_epoch),
-        ],
+        "ProgramArguments": program_arguments,
         "WorkingDirectory": str(repo),
         "RunAtLoad": True,
         "KeepAlive": False,
         "ProcessType": "Background",
+        "ThrottleInterval": 10,
         "StandardOutPath": str(stdout_path),
         "StandardErrorPath": str(stderr_path),
         "EnvironmentVariables": {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
+            "CODEX_THREAD_ID": thread_id,
         },
     }
     with plist.open("wb") as handle:
         plistlib.dump(data, handle, sort_keys=False)
 
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "task_id": args.task_id,
+                "thread_id": thread_id,
+                "repo": str(repo),
+                "remote": args.remote,
+                "branch": args.branch,
+                "base_sha": args.base_sha,
+                "skill_root": str(skill_root),
+                "codex": codex,
+                "goal_status_during_wait": "paused",
+                "wake_mode": "codex_exec_resume",
+                "created_at_epoch": int(time.time()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     result = run("launchctl", "bootstrap", domain(), str(plist))
     if result.returncode != 0:
+        goal_control(skill_root, thread_id, "active", repo, codex)
         print(
             f"error=launchctl_bootstrap_failed detail={result.stderr.strip()}",
             file=sys.stderr,
         )
         return 2
+
     run("launchctl", "kickstart", "-k", f"{domain()}/{label}")
     print(
-        f"event=watcher_started task_id={args.task_id} "
-        f"label={label} plist={plist} transport_events={transport_path}"
+        f"event=event_supervisor_started task_id={args.task_id} "
+        f"thread_id={thread_id} label={label} branch={args.branch} "
+        f"goal_status=paused wake_mode=codex_exec_resume plist={plist}"
+    )
+    print(
+        "instruction=end_current_turn_no_await "
+        "detail=The native goal is paused and the supervisor will resume this same session on a terminal event."
     )
     return 0
 
 
 def status(args: argparse.Namespace) -> int:
-    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
+    label, plist, stdout_path, stderr_path, transport_path, config_path = paths(
+        args.task_id
+    )
     result = run("launchctl", "print", f"{domain()}/{label}")
     print(result.stdout if result.returncode == 0 else result.stderr, end="")
     print(
         f"plist={plist}\nstdout={stdout_path}\nstderr={stderr_path}"
-        f"\ntransport_events={transport_path}"
+        f"\ntransport_events={transport_path}\nwake_config={config_path}"
     )
     return result.returncode
 
 
-def await_event(args: argparse.Namespace) -> int:
-    if sys.platform != "darwin":
-        print("error=requires_macos", file=sys.stderr)
-        return 2
-
-    label, plist, stdout_path, stderr_path, transport_path = paths(args.task_id)
-    deadline = time.monotonic() + args.timeout_seconds
-    watcher_offset = 0
-    transport_offset = 0
-    missing_since: float | None = None
-    last_health_check = 0.0
-
+def deprecated_await(args: argparse.Namespace) -> int:
     print(
-        f"event=await_started task_id={args.task_id} "
-        f"timeout_seconds={args.timeout_seconds}",
-        flush=True,
+        "error=blocking_await_disabled "
+        "detail=Use event-driven start; the supervisor pauses the goal and resumes the same CODEX_THREAD_ID on events.",
+        file=sys.stderr,
     )
-
-    while time.monotonic() < deadline:
-        if stdout_path.exists():
-            with stdout_path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(watcher_offset)
-                for line in handle:
-                    print(line.rstrip("\n"), flush=True)
-                    event = event_from_line(line)
-                    if event in WATCHER_TERMINAL_EVENTS:
-                        return WATCHER_TERMINAL_EVENTS[event]
-                watcher_offset = handle.tell()
-
-        if transport_path.exists():
-            with transport_path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(transport_offset)
-                for line in handle:
-                    event_type, event = transport_event_from_line(line)
-                    if event_type is None:
-                        continue
-                    is_terminal = event_type in TRANSPORT_TERMINAL_EVENTS
-                    print(
-                        f"event=transport_event task_id={args.task_id} "
-                        f"event_type={event_type} terminal={str(is_terminal).lower()} "
-                        f"payload={json.dumps(event.get('payload', {}), ensure_ascii=False)}",
-                        flush=True,
-                    )
-                    if is_terminal:
-                        unload(label, plist)
-                        return TRANSPORT_TERMINAL_EVENTS[event_type]
-                transport_offset = handle.tell()
-
-        now = time.monotonic()
-        if now - last_health_check >= args.health_check_seconds:
-            loaded = run("launchctl", "print", f"{domain()}/{label}").returncode == 0
-            last_health_check = now
-            if loaded:
-                missing_since = None
-            elif missing_since is None:
-                missing_since = now
-            elif now - missing_since >= args.missing_grace_seconds:
-                stderr_tail = ""
-                if stderr_path.exists():
-                    stderr_tail = stderr_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    )[-2000:]
-                print(
-                    f"error=watcher_not_loaded task_id={args.task_id} "
-                    f"plist_exists={str(plist.exists()).lower()} "
-                    f"stderr_tail={stderr_tail!r}",
-                    file=sys.stderr,
-                )
-                return 2
-
-        time.sleep(args.local_poll_seconds)
-
-    print(
-        f"event=await_timeout task_id={args.task_id} "
-        f"timeout_seconds={args.timeout_seconds} implementation_failed=false",
-        flush=True,
-    )
-    return 124
+    return 2
 
 
 def stop(args: argparse.Namespace) -> int:
-    label, plist, _stdout_path, _stderr_path, _transport_path = paths(args.task_id)
+    label, plist, _stdout_path, _stderr_path, _transport_path, config_path = paths(
+        args.task_id
+    )
     unload(label, plist)
+
+    if args.resume_goal and config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            repo = Path(config["repo"]).expanduser().resolve()
+            skill_root = Path(config["skill_root"]).expanduser().resolve()
+            result = goal_control(
+                skill_root,
+                config["thread_id"],
+                "active",
+                repo,
+                config["codex"],
+            )
+            if result.returncode != 0:
+                print(
+                    f"error=goal_resume_failed detail={(result.stderr or result.stdout).strip()}",
+                    file=sys.stderr,
+                )
+                return 2
+        except Exception as exc:
+            print(f"error=invalid_wake_config detail={exc}", file=sys.stderr)
+            return 2
+
     if plist.exists() and not args.keep_plist:
         plist.unlink()
-    print(f"event=watcher_stopped task_id={args.task_id} label={label}")
+    if config_path.exists() and not args.keep_config:
+        config_path.unlink()
+    print(
+        f"event=event_supervisor_stopped task_id={args.task_id} "
+        f"goal_resumed={str(args.resume_goal).lower()}"
+    )
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage macOS launchd handoff watchers")
+    parser = argparse.ArgumentParser(
+        description="Manage event-driven macOS handoff supervisors"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     start_parser = sub.add_parser("start")
@@ -260,6 +328,8 @@ def main() -> int:
     start_parser.add_argument("base_sha")
     start_parser.add_argument("--repo", required=True)
     start_parser.add_argument("--remote", default="origin")
+    start_parser.add_argument("--thread-id")
+    start_parser.add_argument("--codex")
     start_parser.add_argument("--lease-seconds", type=int, default=7200)
     start_parser.add_argument("--poll-seconds", type=int, default=60)
     start_parser.add_argument("--max-poll-seconds", type=int, default=300)
@@ -272,15 +342,13 @@ def main() -> int:
 
     await_parser = sub.add_parser("await")
     await_parser.add_argument("task_id")
-    await_parser.add_argument("--timeout-seconds", type=int, default=7500)
-    await_parser.add_argument("--local-poll-seconds", type=float, default=5.0)
-    await_parser.add_argument("--health-check-seconds", type=float, default=30.0)
-    await_parser.add_argument("--missing-grace-seconds", type=float, default=10.0)
-    await_parser.set_defaults(func=await_event)
+    await_parser.set_defaults(func=deprecated_await)
 
     stop_parser = sub.add_parser("stop")
     stop_parser.add_argument("task_id")
     stop_parser.add_argument("--keep-plist", action="store_true")
+    stop_parser.add_argument("--keep-config", action="store_true")
+    stop_parser.add_argument("--resume-goal", action="store_true")
     stop_parser.set_defaults(func=stop)
 
     args = parser.parse_args()
