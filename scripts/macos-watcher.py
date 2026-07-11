@@ -53,7 +53,11 @@ def domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def run(*args: str, cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+def run(
+    *args: str,
+    cwd: Path | None = None,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=cwd,
@@ -145,7 +149,11 @@ def start(args: argparse.Namespace) -> int:
     plist.parent.mkdir(parents=True, exist_ok=True)
 
     prepared = prepare_branch(
-        skill_root, repo, args.remote, args.branch, args.base_sha
+        skill_root,
+        repo,
+        args.remote,
+        args.branch,
+        args.base_sha,
     )
     if prepared.returncode != 0:
         detail = (prepared.stderr or prepared.stdout).strip()
@@ -159,7 +167,9 @@ def start(args: argparse.Namespace) -> int:
         return 2
 
     unload(label, plist)
-    for path in (stdout_path, stderr_path, transport_path):
+    # Preserve transport events. The supervisor filters them by dispatch_epoch,
+    # preventing a fast post-dispatch terminal event from being deleted here.
+    for path in (stdout_path, stderr_path):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -220,6 +230,7 @@ def start(args: argparse.Namespace) -> int:
                 "remote": args.remote,
                 "branch": args.branch,
                 "base_sha": args.base_sha,
+                "dispatch_epoch": args.dispatch_epoch,
                 "skill_root": str(skill_root),
                 "codex": codex,
                 "goal_status_during_wait": "paused",
