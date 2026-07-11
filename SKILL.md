@@ -1,6 +1,6 @@
 ---
 name: chatgpt-codex-collaboration
-description: Coordinate a macOS-first, goal-bound two-agent coding workflow in which ChatGPT implements one scoped task through either a full local executor or a GitHub connector, while Codex independently verifies the candidate against authoritative specifications. Use when ChatGPT should perform most implementation work, Codex should minimize token use and focus on planning and acceptance, or a long-running Codex /goal must survive external ChatGPT handoffs without deadlocks, false blockers, or polling loops.
+description: Coordinate a macOS-first two-agent coding workflow in which ChatGPT performs most implementation work through either a local executor or GitHub connector, while Codex defines the task, independently verifies the candidate, and continues the same native /goal. Use when Codex token use should be minimized, external ChatGPT work may take a long time, or GitHub handoffs must avoid blocking-await loops, missing branches, false completion receipts, and native-goal deadlocks.
 ---
 
 # ChatGPT-Codex Collaboration
@@ -10,16 +10,18 @@ Use this skill to separate implementation from acceptance:
 - Native Codex `/goal` owns the complete objective.
 - ChatGPT implements one finite, goal-aligned task at a time.
 - Codex owns task definition, authoritative specification, acceptance, and repair decisions.
-- GitHub branch and commit SHA are the code handoff boundary.
+- A remote Git branch and commit SHA are the code handoff boundary.
 - The user resolves undefined product behavior and explicit goal changes.
 
-ChatGPT must not accept its own work. Codex must not silently implement a repair assigned to ChatGPT. A ChatGPT completion message without a remote commit is not a handoff.
+ChatGPT must not accept its own work. Codex must not silently implement a repair assigned to ChatGPT. A response without a remote commit is not a completed handoff.
 
 This version supports macOS 13 or newer only.
 
 ## Resolve Bundled Resources
 
-Resolve `SKILL_ROOT` to the absolute directory containing this `SKILL.md`. Run scripts with absolute paths:
+Resolve `SKILL_ROOT` to the absolute directory containing this `SKILL.md`.
+
+Run bundled scripts through absolute paths:
 
 ```sh
 sh "$SKILL_ROOT/scripts/<script>.sh" ...
@@ -28,14 +30,16 @@ sh "$SKILL_ROOT/scripts/<script>.sh" ...
 Important resources:
 
 - `contracts/collaboration.schema.json`
+- `contracts/handoff-receipt.schema.json`
 - `dependencies.yaml`
 - `config/executor.example.yaml`
 - `scripts/macos-doctor.sh`
 - `scripts/preflight.sh`
+- `scripts/prepare-handoff-branch.sh`
 - `scripts/task-state.sh`
 - `scripts/transport-event.sh`
 - `scripts/macos-watcher.sh`
-- `scripts/recover-capability.sh`
+- `scripts/validate-handoff-receipt.sh`
 - `scripts/validate-handoff.sh`
 - `docs/native-goal-safety.md`
 - `docs/capability-handshake.md`
@@ -44,39 +48,32 @@ Important resources:
 
 Persist task state under `~/.codex/collaboration/tasks`.
 
-## 1. Native Goal Safety Invariant
+## 1. Native Goal Safety and Transport Suspension
 
-The native goal and the collaboration task are separate state machines.
+The native goal and collaboration task are separate state machines.
 
-A task entering any of these states does **not** authorize changing native goal status:
+A task-level blocker does not authorize:
 
-- `CAPABILITY_CHECK`
-- `WAITING_HANDOFF`
-- `BLOCKED_CAPABILITY`
-- `BLOCKED_TRANSPORT`
-- `BLOCKED_OBSERVATION`
-- `BLOCKED_SPEC`
-- `BLOCKED_USER`
-- `REPAIR_REQUIRED`
+- `update_goal(status="blocked")`;
+- clearing or replacing the native goal;
+- permanently pausing the goal;
+- repeated “still blocked” continuation turns.
 
-Therefore:
+The native goal may be marked blocked only when the same complete-goal blocker persists across at least three consecutive native goal turns and no executor fallback, transport fallback, repair, local verification path, user action, or external-state change can make progress.
 
-- Never call `update_goal(status="blocked")` merely because the current collaboration task is blocked.
-- Never issue `/goal pause` automatically.
-- Never clear or replace the goal to escape a task-level blocker.
-- Never repeat “goal remains blocked” status turns after a recoverable executor or transport issue.
+### Authorized temporary suspension
 
-The native goal may be marked blocked only when all are true:
+External ChatGPT implementation is a transport wait, not model work. To prevent active `/goal` continuation turns during that wait, this skill is authorized to temporarily set the same goal to `paused` through the local Codex app-server.
 
-1. the same blocker persists across at least three consecutive native goal turns;
-2. no executor downgrade, transport fallback, repair, or local verification path exists;
-3. no meaningful progress is possible without user input or external-state change;
-4. the blocker applies to the complete goal, not only the current task;
-5. exact evidence is preserved.
+This temporary pause:
 
-Missing ChatGPT local checkout or shell does not satisfy this rule when GitHub connector commits remain available.
+- preserves the same goal ID and objective;
+- is not evidence of failure;
+- must occur only after a valid implementation dispatch;
+- must be paired with event-driven resume of the same `CODEX_THREAD_ID`;
+- must not be used to hide a task blocker.
 
-Read `docs/native-goal-safety.md` before mutating native goal status.
+The event supervisor reactivates the same goal and runs `codex exec resume <thread-id> <prompt>` only after a terminal Git or transport event.
 
 ## 2. macOS Environment Gate
 
@@ -91,22 +88,22 @@ Before goal or task work:
    ```
 
 3. Treat doctor failures as hard environment blocks.
-4. Require Codex to have a complete local repository checkout and command execution for final acceptance.
-5. Do not automatically install packages, widen permissions, or request Full Disk Access.
+4. Require a complete local repository checkout and command execution for Codex acceptance.
+5. Require `CODEX_THREAD_ID`, `codex app-server`, and `codex exec resume` for automatic event-driven recovery.
+6. Do not automatically install packages, widen permissions, or request Full Disk Access.
 
 ## 3. Native Goal Gate
 
 1. Call `get_goal`.
-2. Preserve an active goal's `goal_id` and full objective.
+2. Preserve an active goal's `goal_id` and complete objective.
 3. If no goal exists or the previous goal is complete, call `create_goal` using the user's requested end state and authoritative specifications. Do not shrink the goal to the first task.
-4. If the goal is paused or blocked because an older version of this skill incorrectly changed it:
+4. If an older workflow incorrectly left the goal blocked or paused:
    - preserve the same goal ID and objective;
    - do not create a replacement goal;
-   - request one native `/goal resume` action;
-   - after resume, recover the task with `recover-capability.sh` and rerun the handshake.
-5. If a paused, blocked, usage-limited, or budget-limited goal is unrelated to this workflow, do not override it.
-6. Record goal binding in task state.
-7. Before each implementation or repair dispatch, confirm the same active goal still governs the work.
+   - resume that same goal once;
+   - recover the existing task and continue.
+5. If the goal is paused, blocked, usage-limited, or budget-limited for an unrelated reason, do not override it.
+6. Before every implementation or repair dispatch, confirm the same active goal governs the task.
 
 Task acceptance is not goal completion.
 
@@ -127,15 +124,15 @@ After reading repository instructions and authoritative specifications:
 
 1. Choose one finite task that materially advances the goal.
 2. Identify allowed paths, forbidden changes, and Codex acceptance commands.
-3. Create the assigned branch and record its remote HEAD as `base_sha`.
-4. Create task state; initial executor is `none / UNASSESSED`.
+3. Determine the repository, remote, assigned branch, and base SHA.
+4. Create persistent task state with executor `none / UNASSESSED`.
 5. Transition:
 
    ```text
    DISCOVERING → CAPABILITY_CHECK
    ```
 
-Do not dispatch implementation or start a watcher before the handshake passes.
+Do not dispatch implementation or start the event supervisor before the capability handshake passes.
 
 ## 6. ChatGPT Capability Handshake
 
@@ -165,14 +162,14 @@ Return exactly one JSON object:
 }
 ```
 
-Profile rules:
+Profiles:
 
-- `local_full`: local checkout, shell, checks, commit, and push are available.
-- `github_connector`: repository read/write and branch commits are available through GitHub connector; local shell and tests are unavailable.
+- `local_full`: local checkout, shell, focused checks, commit, and push are available.
+- `github_connector`: GitHub connector can read, edit, commit, and push; local shell and tests are unavailable.
 - `read_only`: repository can be read but no candidate commit can be created.
 - `none`: no usable repository executor exists.
 
-Validate and save:
+Validate and save the response:
 
 ```sh
 sh "$SKILL_ROOT/scripts/task-state.sh" set-executor \
@@ -194,9 +191,31 @@ After a ready profile:
 CAPABILITY_CHECK → READY
 ```
 
-Capability is based on actual tools, not model confidence or prompt text.
+Capability is based on actual tools, not confidence or prompt text.
 
-## 7. Profile-Aware Task Contract
+## 7. Prepare the Remote Handoff Branch
+
+The assigned branch must exist on the remote before ChatGPT receives the implementation task, especially for `github_connector`.
+
+Run:
+
+```sh
+sh "$SKILL_ROOT/scripts/prepare-handoff-branch.sh" \
+  <repo-path> <remote> <branch> <base-sha>
+```
+
+This command must prove:
+
+- the remote is reachable;
+- the branch exists remotely;
+- the branch HEAD equals the recorded base SHA;
+- a missing branch was successfully created with an exact non-force push.
+
+Do not dispatch when the remote branch is missing, inaccessible, or points at an unexpected commit.
+
+A local branch name or claimed branch HEAD is not sufficient evidence.
+
+## 8. Profile-Aware Task Contract
 
 ### `local_full`
 
@@ -214,31 +233,32 @@ ChatGPT edits, runs focused checks, commits, pushes, and returns evidence.
 Executor profile: github_connector
 Implementation validation policy: deferred_to_codex
 Candidate commit without tests: true
+Remote branch is already created and writable.
 ```
 
 Explicitly tell ChatGPT:
 
 ```text
 You do not need a local checkout or shell for this task.
-Use the GitHub connector to read and edit the assigned branch.
-Create a candidate commit on that branch.
+Use the GitHub connector to read and edit the assigned existing remote branch.
+Create and push a candidate commit on that exact branch before responding.
 For commands you cannot run, return status=not_run and verification_status=pending_codex_verification.
-Do not treat missing local tests as a blocker; Codex will fetch the candidate and run all acceptance locally.
+Do not treat missing local tests as a blocker; Codex will run all acceptance locally.
 ```
 
-Never combine `github_connector` with a requirement that ChatGPT must pass local tests before commit.
+Never combine `github_connector` with a requirement that ChatGPT pass local tests before commit.
 
 Every task contract includes:
 
-- parent goal ID and full objective;
+- parent goal ID and complete objective;
 - goal contribution;
 - task ID and objective;
 - executor profile and validation policy;
-- repository, branch, and base SHA;
+- repository, remote branch, and base SHA;
 - authoritative references;
 - allowed and forbidden paths;
 - Codex acceptance commands;
-- required commit, changed files, test results, blockers, and verification status.
+- the strict handoff receipt format.
 
 Persist dispatch ID and message fingerprint. Transition:
 
@@ -246,9 +266,39 @@ Persist dispatch ID and message fingerprint. Transition:
 READY → DISPATCHING → IMPLEMENTING → WAITING_HANDOFF
 ```
 
-## 8. Low-Token, Blocker-Aware Wait
+## 9. Strict Handoff Receipt
 
-Start watcher only after dispatch:
+ChatGPT's final response must be exactly one receipt conforming to `contracts/handoff-receipt.schema.json`.
+
+A completed receipt requires:
+
+- `status: completed`;
+- a non-null 40-character `commit_sha`;
+- at least one changed file;
+- no blockers;
+- `verification_status: implementer_verified` or `pending_codex_verification`.
+
+A blocked receipt requires:
+
+- `status: blocked`;
+- `commit_sha: null`;
+- at least one explicit blocker;
+- `verification_status: blocked`.
+
+`pending_codex_verification`, `not_run`, or `Blockers: 無` without a commit SHA is not completion. It is an invalid receipt and must produce `conversation_completed_no_commit`.
+
+Validate an extracted receipt with:
+
+```sh
+sh "$SKILL_ROOT/scripts/validate-handoff-receipt.sh" \
+  <receipt-json-file>
+```
+
+Do not start or continue waiting based solely on prose claims.
+
+## 10. Event-Driven External Wait
+
+After a valid dispatch, start the event supervisor:
 
 ```sh
 sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
@@ -258,76 +308,93 @@ sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
   --dispatch-epoch <epoch>
 ```
 
-Then block the current Codex turn:
+`start` performs these actions atomically:
 
-```sh
-sh "$SKILL_ROOT/scripts/macos-watcher.sh" await \
-  <task-id> --timeout-seconds <lease-plus-grace>
-```
+1. verifies or creates the remote branch at the exact base SHA;
+2. reads `CODEX_THREAD_ID`;
+3. temporarily pauses the same native goal through `codex app-server`;
+4. starts a per-task launchd event supervisor;
+5. records the wake configuration;
+6. returns immediately so the current turn can end.
 
-The Git watcher invokes no LLM, starts at 60-second polling, backs off to 300 seconds, and emits only state changes.
+Do not run blocking `await`. The `await` command is intentionally disabled because the execution platform may force a 300-second timeout and create continuation loops.
 
-The local await monitors:
+During the external wait:
 
-1. Git watcher events; and
-2. ChatGPT transport events under `~/.codex/collaboration/events`.
+- native goal status is temporarily paused;
+- no Codex model turn remains active;
+- Git polling starts at 60 seconds and backs off to 300 seconds;
+- local ChatGPT transport events are monitored;
+- no LLM is invoked.
 
-When ChatGPT reaches a terminal condition, the transport adapter emits an event, for example:
+Terminal events:
+
+- remote branch HEAD differs from base SHA;
+- `implementation_blocked`;
+- `capability_rejected`;
+- `conversation_completed_no_commit`;
+- `conversation_failed`;
+- `transport_unreachable`;
+- `mode_drifted`;
+- observation lease expiry.
+
+On a terminal event, the supervisor:
+
+1. reactivates the same native goal;
+2. runs `codex exec --json resume <CODEX_THREAD_ID> <event prompt>`;
+3. resumes the same persisted session and task;
+4. logs the resumed run;
+5. pauses the goal again and sends a macOS notification if automatic resume fails.
+
+## 11. Transport Adapter Responsibilities
+
+When the ChatGPT response reaches a terminal condition, the transport adapter must emit a local event.
+
+Example:
 
 ```sh
 sh "$SKILL_ROOT/scripts/transport-event.sh" emit \
-  <task-id> implementation_blocked \
+  <task-id> conversation_completed_no_commit \
   --source chatgpt-ui \
-  --code NO_LOCAL_EXECUTOR \
-  --reason "ChatGPT has no local checkout or shell"
+  --reason "ChatGPT completed without a valid commit receipt"
 ```
 
-Terminal transport events stop the watcher and return immediately:
+For a valid commit, the Git branch change is sufficient to trigger resume; a separate UI event is optional.
 
-- `implementation_blocked`
-- `conversation_completed_no_commit`
-- `conversation_failed`
-- `transport_unreachable`
-- `mode_drifted`
+For an invalid or blocked response, the adapter must not leave the supervisor waiting for a commit that cannot appear.
 
-While await runs, do not end the Codex turn, produce status prose, repeatedly call `get_goal`, or ask ChatGPT for progress.
-
-## 9. Terminal Event Handling
+## 12. Terminal Event Handling
 
 ### `handoff_candidate`
 
-Proceed to handoff validation.
+Proceed to GitHub handoff validation.
 
-### `implementation_blocked`
+### `implementation_blocked` or `capability_rejected`
 
-1. Stop watcher.
-2. Keep native goal active and unchanged.
-3. Inspect blocker against saved handshake.
-4. Run:
-
-   ```sh
-   sh "$SKILL_ROOT/scripts/recover-capability.sh" <task-id>
-   ```
-
-5. Rerun handshake.
-6. If GitHub connector read/write/commit/push remains available, select `github_connector` and redispatch a profile-aware contract.
-7. Enter `BLOCKED_CAPABILITY` only when no profile can create a candidate commit.
-
-Do not call `update_goal(blocked)` and do not pause the goal during this recovery.
+1. Keep the same native goal.
+2. Recover the task to capability checking.
+3. Rerun the handshake.
+4. Downgrade from `local_full` to `github_connector` when connector commit capability remains available.
+5. Enter `BLOCKED_CAPABILITY` only when no accepted profile can create a candidate commit.
 
 ### `conversation_completed_no_commit`
 
-Send one focused commit-and-push request using the saved profile. If commit is impossible, recover capability and re-handshake.
+Treat it as protocol failure, not an active wait.
 
-### `conversation_failed`, `transport_unreachable`, `mode_drifted`
+1. Verify that the remote branch did not advance.
+2. Send one focused request requiring a commit and strict receipt.
+3. If commit remains impossible, recover capability and rerun the handshake.
+4. Never accept `pending_codex_verification` without a commit SHA.
 
-Transition the task to `BLOCKED_TRANSPORT`, preserve evidence, and leave native goal unchanged. Use a stable await or authorized user action rather than repeatedly generating goal turns.
+### `conversation_failed`, `transport_unreachable`, or `mode_drifted`
 
-## 10. GitHub Handoff Gate
+Transition the collaboration task to `BLOCKED_TRANSPORT`, preserve evidence, and keep the same native goal identity.
+
+## 13. GitHub Handoff Gate
 
 After a candidate appears:
 
-1. Confirm the same active native goal.
+1. Confirm the same native goal identity.
 2. Validate:
 
    ```sh
@@ -335,10 +402,14 @@ After a candidate appears:
      <repo-path> <remote> <branch> <base-sha> <candidate-sha> <allowed-path>...
    ```
 
-3. Record executor profile and verification status.
-4. A branch change is a candidate, not acceptance.
+3. Confirm the candidate is the current remote branch HEAD.
+4. Confirm candidate differs from base SHA.
+5. Confirm changed files are in scope and contain no forbidden artifacts.
+6. Record executor profile and verification status.
 
-## 11. Codex Acceptance
+A branch change is a candidate, not acceptance.
+
+## 14. Codex Acceptance
 
 Codex always performs independent acceptance.
 
@@ -362,42 +433,41 @@ Inspect:
 
 Only `VERIFYING` may transition the task to `ACCEPTED`.
 
-## 12. Repair Loop
+## 15. Repair Loop
 
 When acceptance fails:
 
 1. Transition `VERIFYING → REPAIR_REQUIRED`.
 2. Do not patch ChatGPT's implementation locally.
-3. Send exact failure evidence and one expected correction.
+3. Send exact failure evidence and one concrete expected correction.
 4. Preserve executor profile and validation policy.
-5. Record candidate as next base SHA, increment repair count, transition to `WAITING_REPAIR`, and repeat watcher plus blocker-aware await.
+5. Record the candidate as the next base SHA.
+6. Ensure the remote branch still exists at that base SHA.
+7. Dispatch the repair and start a new event-driven wait.
 
 Task repair failure does not authorize native goal blocking.
 
-## 13. Task Completion and Goal Continuation
+## 16. Task Completion and Goal Continuation
 
 After task acceptance:
 
-1. Stop LaunchAgent.
-2. Persist accepted SHA and evidence.
+1. Stop and remove any remaining LaunchAgent.
+2. Persist accepted SHA and acceptance evidence.
 3. Reassess the complete native goal.
 4. Call `update_goal(status="complete")` only when every requirement is proven and no required work remains.
 5. Otherwise keep the goal active and select the next finite task.
 
-## 14. Recovery
+## 17. Recovery
 
 On restart:
 
 1. Resolve `SKILL_ROOT` and rerun Mac Doctor.
 2. Call `get_goal` before reading task state.
-3. If the native goal was incorrectly blocked or paused by an older workflow:
-   - preserve the same goal ID and objective;
-   - request one `/goal resume` action;
-   - do not create a replacement goal;
-   - after resume run `recover-capability.sh`;
-   - rerun handshake and continue.
-4. Resume normally only when goal IDs match.
-5. Read saved executor handshake before redispatching.
-6. Do not reuse a stale executor profile after a capability blocker.
-7. Inspect watcher and transport event logs before starting a new watcher.
-8. Never redispatch blindly or create repeated “still blocked” turns.
+3. Preserve the same goal ID and objective.
+4. Inspect task state, wake configuration, supervisor status, logs, remote branch, and transport events.
+5. If a previous blocking-await workflow is still running, stop it and restart with event-driven `macos-watcher.sh start`.
+6. If the remote handoff branch is absent, create it at base SHA before redispatching.
+7. Do not reuse a stale executor profile after a capability blocker.
+8. Do not create repeated “still waiting” or “still blocked” turns.
+
+The formal wait path is always suspend-and-resume, never blocking await.
