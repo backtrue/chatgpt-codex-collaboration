@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -84,12 +85,53 @@ def terminate_process(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=5)
 
 
+def launch_paths(task_id: str) -> tuple[str, Path, Path]:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", task_id)
+    label = f"com.backtrue.chatgpt-codex.{safe}"
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    config = Path(
+        os.environ.get("COLLAB_WAKE_ROOT", "~/.codex/collaboration/wakes")
+    ).expanduser() / f"{safe}.json"
+    return label, plist, config
+
+
+def cleanup_generation(task_id: str, generation_id: str) -> bool:
+    label, plist, config_path = launch_paths(task_id)
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if config.get("generation_id") != generation_id:
+            return False
+    elif plist.exists():
+        return False
+
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}/{label}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        plist.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        config_path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Resume the same Codex session after a collaboration event"
     )
     parser.add_argument("task_id")
     parser.add_argument("thread_id")
+    parser.add_argument("generation_id")
     parser.add_argument("event_type")
     parser.add_argument("event_id")
     parser.add_argument("--repo", required=True)
@@ -115,14 +157,16 @@ def main() -> int:
     safe_event = "".join(
         ch if ch.isalnum() or ch in "._-" else "-" for ch in args.event_id
     )
-    lock_path = wake_root / f"{args.task_id}.{safe_event}.lock"
+    lock_path = wake_root / (
+        f"{args.task_id}.{args.generation_id}.{safe_event}.lock"
+    )
     try:
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
     except FileExistsError:
         print(
             f"event=wake_duplicate_ignored task_id={args.task_id} "
-            f"event_id={args.event_id}"
+            f"generation_id={args.generation_id} event_id={args.event_id}"
         )
         return 0
 
@@ -140,6 +184,7 @@ def main() -> int:
     prompt = f"""Use the installed chatgpt-codex-collaboration skill and resume the existing collaboration task.
 
 Task ID: {args.task_id}
+Supervisor generation: {args.generation_id}
 Terminal event: {args.event_type}
 Event ID: {args.event_id}
 Candidate SHA: {args.candidate_sha or 'none'}
@@ -163,6 +208,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                         "event": "codex_resume_started",
                         "task_id": args.task_id,
                         "thread_id": args.thread_id,
+                        "generation_id": args.generation_id,
                         "event_type": args.event_type,
                         "event_id": args.event_id,
                         "goal_status": "paused",
@@ -201,6 +247,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                             {
                                 "event": "native_goal_reactivation",
                                 "task_id": args.task_id,
+                                "generation_id": args.generation_id,
                                 "returncode": active.returncode,
                                 "detail": (
                                     active.stdout.strip()
@@ -218,14 +265,17 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                     goal_reactivated = True
 
             returncode = proc.wait()
+            cleaned = cleanup_generation(args.task_id, args.generation_id)
             log.write(
                 json.dumps(
                     {
                         "event": "codex_resume_finished",
                         "task_id": args.task_id,
+                        "generation_id": args.generation_id,
                         "event_id": args.event_id,
                         "returncode": returncode,
                         "goal_reactivated": goal_reactivated,
+                        "supervisor_generation_cleaned": cleaned,
                         "duration_seconds": round(time.time() - started, 3),
                     }
                 )
@@ -256,7 +306,8 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
 
         print(
             f"event=codex_session_resumed task_id={args.task_id} "
-            f"thread_id={args.thread_id} event_id={args.event_id} log={log_path}"
+            f"generation_id={args.generation_id} thread_id={args.thread_id} "
+            f"event_id={args.event_id} log={log_path}"
         )
         return 0
     except Exception as exc:
@@ -270,6 +321,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                 repo,
                 codex,
             )
+        cleanup_generation(args.task_id, args.generation_id)
         remove_lock(lock_path)
         notify(
             "ChatGPT-Codex resume failed",
