@@ -87,6 +87,8 @@ required:
       purpose: "Provide a macOS notification fallback when automatic Codex resume fails."
     open:
       purpose: "Open the approved ChatGPT conversation surface."
+    browser-use:
+      purpose: "Control the approved ChatGPT web conversation through local Chrome CDP without using Codex model turns for waiting."
 
   verifier_capabilities:
     codex_thread_id:
@@ -99,7 +101,7 @@ required:
       description: "Use codex exec resume to continue the same thread after a watcher event."
       missing_behavior: "notify_only"
     chatgpt_conversation_access:
-      description: "Open, inspect, and send messages to the approved ChatGPT conversation."
+      description: "Open, inspect, and send messages to the approved ChatGPT web conversation through browser-use CDP."
       missing_behavior: "BLOCKED_TRANSPORT"
     local_repository_checkout:
       description: "Codex can read the complete repository locally."

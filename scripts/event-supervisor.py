@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -153,6 +154,79 @@ def launch_wake(
     return 0
 
 
+def start_browser_transport(args: argparse.Namespace) -> tuple[subprocess.Popen[bytes] | None, object | None]:
+    if not args.browser_script:
+        return None, None
+    required = {
+        "browser_script": args.browser_script,
+        "conversation_url": args.conversation_url,
+        "prompt_file": args.prompt_file,
+        "dispatch_id": args.dispatch_id,
+        "message_fingerprint": args.message_fingerprint,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError(f"missing_browser_transport_fields:{','.join(missing)}")
+    browser_use = args.browser_use or shutil.which("browser-use")
+    if not browser_use:
+        raise FileNotFoundError("browser-use")
+    script_path = Path(args.browser_script).expanduser().resolve()
+    prompt_path = Path(args.prompt_file).expanduser().resolve()
+    if not script_path.is_file() or not prompt_path.is_file():
+        raise FileNotFoundError("browser transport script or prompt file")
+    log_root = Path(
+        os.environ.get("COLLAB_LOG_ROOT", "~/.codex/collaboration/logs")
+    ).expanduser()
+    log_root.mkdir(parents=True, exist_ok=True)
+    stdout = (log_root / f"{args.task_id}.browser.out.log").open("ab")
+    stderr = (log_root / f"{args.task_id}.browser.err.log").open("ab")
+    env = os.environ.copy()
+    env.update(
+        {
+            "CHATGPT_CONVERSATION_URL": args.conversation_url,
+            "CHATGPT_PROMPT_FILE": str(prompt_path),
+            "COLLAB_TASK_ID": args.task_id,
+            "COLLAB_DISPATCH_ID": args.dispatch_id,
+            "COLLAB_MESSAGE_FINGERPRINT": args.message_fingerprint,
+            "COLLAB_REPO": str(Path(args.repo).expanduser().resolve()),
+            "COLLAB_REMOTE": args.remote,
+            "COLLAB_BRANCH": args.branch,
+            "COLLAB_BASE_SHA": args.base_sha,
+            "COLLAB_EVENT_ROOT": str(Path(args.transport_events).expanduser().resolve().parent),
+            "COLLAB_LEASE_SECONDS": str(args.lease_seconds),
+            "COLLAB_POLL_SECONDS": str(args.browser_poll_seconds),
+            "COLLAB_MAX_POLL_SECONDS": str(args.max_poll_seconds),
+        }
+    )
+    process = subprocess.Popen(
+        [browser_use],
+        cwd=args.repo,
+        env=env,
+        stdin=script_path.open("rb"),
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return process, (stdout, stderr)
+
+
+def stop_browser_transport(
+    process: subprocess.Popen[bytes] | None,
+    streams: object | None,
+) -> None:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    if isinstance(streams, tuple):
+        for stream in streams:
+            stream.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Watch Git and transport events, then resume the same Codex thread"
@@ -172,6 +246,13 @@ def main() -> int:
     parser.add_argument("--backoff-after", type=int, default=5)
     parser.add_argument("--dispatch-epoch", type=int, default=int(time.time()))
     parser.add_argument("--codex")
+    parser.add_argument("--browser-script")
+    parser.add_argument("--browser-use")
+    parser.add_argument("--conversation-url")
+    parser.add_argument("--prompt-file")
+    parser.add_argument("--dispatch-id")
+    parser.add_argument("--message-fingerprint")
+    parser.add_argument("--browser-poll-seconds", type=int, default=60)
     args = parser.parse_args()
 
     if not TASK_RE.fullmatch(args.task_id):
@@ -182,6 +263,9 @@ def main() -> int:
         return 2
     if args.poll_seconds < 1 or args.max_poll_seconds < args.poll_seconds:
         print("error=invalid_poll_timing", file=sys.stderr)
+        return 2
+    if args.browser_poll_seconds < 1:
+        print("error=invalid_browser_poll_timing", file=sys.stderr)
         return 2
 
     repo = Path(args.repo).expanduser().resolve()
@@ -194,6 +278,17 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
+
+    try:
+        browser_process, browser_streams = start_browser_transport(args)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        emit(
+            "transport_unreachable",
+            task_id=args.task_id,
+            generation_id=args.generation_id,
+            detail=str(exc),
+        )
+        return 2
 
     emit(
         "supervisor_started",
@@ -210,6 +305,7 @@ def main() -> int:
         elapsed = int(time.time()) - args.dispatch_epoch
         if elapsed >= args.lease_seconds:
             event_id = f"lease-{args.dispatch_epoch}-{args.lease_seconds}"
+            stop_browser_transport(browser_process, browser_streams)
             return launch_wake(
                 skill_root,
                 args.task_id,
@@ -231,6 +327,7 @@ def main() -> int:
                     if event_epoch is not None and event_epoch < args.dispatch_epoch:
                         continue
                     if event_type in TRANSPORT_TERMINAL_EVENTS:
+                        stop_browser_transport(browser_process, browser_streams)
                         emit(
                             "transport_terminal",
                             task_id=args.task_id,
@@ -253,9 +350,25 @@ def main() -> int:
                         )
                 transport_offset = handle.tell()
 
+        if browser_process is not None and browser_process.poll() is not None:
+            stop_browser_transport(browser_process, browser_streams)
+            return launch_wake(
+                skill_root,
+                args.task_id,
+                args.thread_id,
+                args.generation_id,
+                "transport_unreachable",
+                f"browser-exit-{args.dispatch_epoch}",
+                repo,
+                None,
+                {"reason": "browser_use_exited_without_terminal_event"},
+                args.codex,
+            )
+
         state, head, detail = remote_head(repo, args.remote, args.branch)
         if state == "ok" and head is not None:
             if head.lower() != args.base_sha.lower():
+                stop_browser_transport(browser_process, browser_streams)
                 event_id = f"commit-{head.lower()}"
                 emit(
                     "handoff_candidate",
@@ -301,6 +414,7 @@ def main() -> int:
 
         time.sleep(current_poll)
 
+    stop_browser_transport(browser_process, browser_streams)
     emit(
         "supervisor_interrupted",
         task_id=args.task_id,

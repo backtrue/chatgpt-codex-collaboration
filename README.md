@@ -506,7 +506,7 @@ External wait 的 temporary pause 只是 transport suspension，必須和 event-
 - independent Codex acceptance
 - recovery rules
 
-仍需要 ChatGPT transport adapter 實際做到：
+`scripts/browser-use-transport.sh` 提供 ChatGPT web transport adapter，實際做到：
 
 1. 開啟既有對話
 2. 確認 Chat mode
@@ -514,5 +514,8 @@ External wait 的 temporary pause 只是 transport suspension，必須和 event-
 4. 發送 profile-aware contract
 5. 解析 strict handoff receipt
 6. 對 invalid／blocked／failed response 寫入 terminal event
+
+它透過 Chrome/Chromium CDP 執行，不使用 `computer-use`、`screencapture` 或
+`osascript` 進行長時間等待；若 CDP 不可用，直接寫入 `transport_unreachable`。
 
 目前為 **macOS-first experimental workflow**。先在測試 repository 完整跑通 suspend → Git commit → same-session resume → Codex acceptance，再投入重要專案。

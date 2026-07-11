@@ -117,7 +117,7 @@ A local branch name is not proof that a GitHub connector can write the branch.
 
 ## 5. Control Plane
 
-The control plane opens the approved ChatGPT conversation, verifies Chat mode, sends handshake and task contracts, reads completed responses, and emits terminal transport events.
+The control plane opens the approved ChatGPT conversation through the bundled browser-use CDP adapter, verifies Chat mode, sends handshake and task contracts, reads completed responses, and emits terminal transport events. The adapter runs as a non-LLM background process; Codex is resumed only after a terminal event or remote branch movement.
 
 Required adapter operations:
 
@@ -130,6 +130,12 @@ Required adapter operations:
 - `parse_handoff_receipt()`
 - `emit_transport_event()`
 - `detect_terminal_error()`
+
+The formal web transport is `scripts/browser-use-transport.sh`. It performs one
+dispatch, then observes the same conversation without sending status or repair prompts.
+Normal mode uses DOM and CDP state. If Chrome CDP is unavailable, it emits
+`transport_unreachable` instead of falling back to repeated screenshot or `osascript`
+inspection.
 
 A completed UI response is not a code handoff.
 

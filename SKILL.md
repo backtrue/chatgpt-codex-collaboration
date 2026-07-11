@@ -5,6 +5,25 @@ description: Coordinate a macOS-first two-agent coding workflow in which ChatGPT
 
 # ChatGPT-Codex Collaboration
 
+## 設計目的（不可偏離）
+
+本 skill 的目的不是讓 ChatGPT 與 Codex 平等分擔開發，而是進行模型能力與
+token 成本分工：使用高能力、較適合複雜理解與實作的 ChatGPT 作為主力開發者，
+使用低成本的 Codex 作為企劃、監測、交接、驗證與控制者，以較低 Codex token
+成本完成可靠的開發流程。
+
+不可偏離原則：
+
+- ChatGPT 優先承擔複雜需求理解、程式修改與實作細節。
+- Codex 優先承擔有限工作拆分、規格守門、GitHub 交接、驗證、退回與狀態控制。
+- Codex 不應接手原本應由 ChatGPT 完成的實作，除非使用者明確改變分工。
+- Codex 不應為了製造進度而重複截圖、輪詢、重送 repair 或消耗 continuation turn。
+- 沒有新證據時，流程必須停止、去重或暫停，不能用更多 Codex 回合取代缺少的實作證據。
+
+每次維護本 skill 前，先確認修改是否仍然讓 ChatGPT 承擔主要開發工作，並讓 Codex
+以最低必要成本完成控制與驗收。若修改讓 Codex 變成主要實作者，或讓 Codex 反覆
+觀察而沒有新增證據，該修改即偏離本 skill 的設計目的。
+
 Use this skill to separate implementation from acceptance:
 
 - Native Codex `/goal` owns the complete objective.
@@ -38,6 +57,7 @@ Important resources:
 - `scripts/prepare-handoff-branch.sh`
 - `scripts/task-state.sh`
 - `scripts/transport-event.sh`
+- `scripts/browser-use-transport.sh`
 - `scripts/macos-watcher.sh`
 - `scripts/validate-handoff-receipt.sh`
 - `scripts/validate-handoff.sh`
@@ -90,7 +110,8 @@ Before goal or task work:
 3. Treat doctor failures as hard environment blocks.
 4. Require a complete local repository checkout and command execution for Codex acceptance.
 5. Require `CODEX_THREAD_ID`, `codex app-server`, and `codex exec resume` for automatic event-driven recovery.
-6. Do not automatically install packages, widen permissions, or request Full Disk Access.
+6. Require `browser-use` and a Chrome/Chromium CDP session for the formal web transport path.
+7. Do not automatically install packages, widen permissions, or request Full Disk Access.
 
 ## 3. Native Goal Gate
 
@@ -362,6 +383,11 @@ manual recovery after new evidence appears.
 ## 11. Transport Adapter Responsibilities
 
 When the ChatGPT response reaches a terminal condition, the transport adapter must emit a local event.
+
+The formal web adapter is `scripts/browser-use-transport.sh`. It opens the approved
+ChatGPT conversation through Chrome CDP, confirms plain `Chat` mode, sends one prompt,
+and watches the response outside the active Codex turn. It must not use `computer-use`,
+`screencapture`, or `osascript` as a waiting loop.
 
 Example:
 

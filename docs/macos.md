@@ -149,6 +149,7 @@ The LaunchAgent runs `event-supervisor.py` and monitors:
 
 - remote branch HEAD;
 - ChatGPT terminal-event JSONL;
+- the browser-use CDP transport when browser transport arguments are supplied;
 - observation lease.
 
 Git polling starts at 60 seconds and backs off to 300 seconds. No LLM is invoked.
@@ -214,6 +215,31 @@ Other terminal events:
 
 A valid branch commit wakes Codex directly; no UI event is required.
 
+## Browser-use ChatGPT Transport
+
+The formal web path uses the bundled browser-use adapter. Pass these values to
+`macos-watcher.sh start` after the capability handshake and before ending the current
+Codex turn:
+
+```sh
+sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
+  TASK-001 chatgpt/TASK-001 <base-sha> \
+  --repo /absolute/path/to/repository \
+  --remote origin \
+  --executor-profile github_connector \
+  --browser-script "$SKILL_ROOT/scripts/browser-use-transport.py" \
+  --conversation-url https://chatgpt.com/c/<approved-conversation-id> \
+  --prompt-file /absolute/path/to/task-contract.txt \
+  --dispatch-id task-001-dispatch-1 \
+  --message-fingerprint <sha256-of-prompt>
+```
+
+The adapter opens the approved conversation, confirms plain `Chat` mode, sends the
+prompt once, and observes the response through Chrome CDP. It writes terminal events
+to `~/.codex/collaboration/events/<task-id>.jsonl`. It does not use `computer-use`,
+`screencapture`, or `osascript` for waiting. If CDP is unavailable, it emits
+`transport_unreachable` and stops; it does not retry the prompt.
+
 ## Inspect and Stop
 
 Inspect:
@@ -257,9 +283,9 @@ Grant only the minimum required permission. Do not grant Full Disk Access merely
 
 ## Known Boundary
 
-This repository provides goal control, branch preparation, state, contracts, event supervisor, session wakeup, and verifier workflow.
+This repository provides goal control, branch preparation, state, contracts, the browser-use ChatGPT transport adapter, event supervisor, session wakeup, and verifier workflow.
 
-A complete installation still needs a ChatGPT transport adapter that can:
+A complete installation still needs a running Chrome/Chromium CDP session with the approved ChatGPT conversation available. The adapter must:
 
 1. open the approved conversation;
 2. confirm Chat mode;
@@ -267,3 +293,4 @@ A complete installation still needs a ChatGPT transport adapter that can:
 4. send profile-aware task contracts;
 5. parse the strict handoff receipt;
 6. emit terminal events for invalid, blocked, or failed responses.
+7. keep the browser observer outside active Codex model turns.

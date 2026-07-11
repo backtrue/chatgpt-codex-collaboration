@@ -178,6 +178,27 @@ def start(args: argparse.Namespace) -> int:
         print("error=invalid_lease_seconds", file=sys.stderr)
         return 2
 
+    browser_fields = {
+        "browser_script": args.browser_script,
+        "conversation_url": args.conversation_url,
+        "prompt_file": args.prompt_file,
+        "dispatch_id": args.dispatch_id,
+        "message_fingerprint": args.message_fingerprint,
+    }
+    if any(browser_fields.values()) and not all(browser_fields.values()):
+        print(
+            "error=incomplete_browser_transport_fields "
+            f"missing={','.join(name for name, value in browser_fields.items() if not value)}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.browser_script and not Path(args.browser_script).expanduser().is_file():
+        print("error=browser_transport_script_not_found", file=sys.stderr)
+        return 2
+    if args.prompt_file and not Path(args.prompt_file).expanduser().is_file():
+        print("error=browser_transport_prompt_not_found", file=sys.stderr)
+        return 2
+
     repo = Path(args.repo).expanduser().resolve()
     skill_root = Path(__file__).resolve().parent.parent
     supervisor = skill_root / "scripts" / "event-supervisor.py"
@@ -245,6 +266,25 @@ def start(args: argparse.Namespace) -> int:
         "--codex",
         codex,
     ]
+    if args.browser_script:
+        program_arguments.extend(
+            [
+                "--browser-script",
+                str(Path(args.browser_script).expanduser().resolve()),
+                "--browser-use",
+                args.browser_use or "browser-use",
+                "--conversation-url",
+                args.conversation_url,
+                "--prompt-file",
+                str(Path(args.prompt_file).expanduser().resolve()),
+                "--dispatch-id",
+                args.dispatch_id,
+                "--message-fingerprint",
+                args.message_fingerprint,
+                "--browser-poll-seconds",
+                str(args.browser_poll_seconds),
+            ]
+        )
 
     data = {
         "Label": label,
@@ -283,6 +323,9 @@ def start(args: argparse.Namespace) -> int:
                 "codex": codex,
                 "goal_status_during_wait": "paused",
                 "wake_mode": "codex_exec_resume",
+                "browser_transport": bool(args.browser_script),
+                "conversation_url": args.conversation_url,
+                "dispatch_id": args.dispatch_id,
                 "created_at_epoch": int(time.time()),
             },
             ensure_ascii=False,
@@ -398,6 +441,13 @@ def main() -> int:
     start_parser.add_argument("--lease-seconds", type=int)
     start_parser.add_argument("--poll-seconds", type=int, default=60)
     start_parser.add_argument("--max-poll-seconds", type=int, default=300)
+    start_parser.add_argument("--browser-script")
+    start_parser.add_argument("--browser-use")
+    start_parser.add_argument("--conversation-url")
+    start_parser.add_argument("--prompt-file")
+    start_parser.add_argument("--dispatch-id")
+    start_parser.add_argument("--message-fingerprint")
+    start_parser.add_argument("--browser-poll-seconds", type=int, default=60)
     start_parser.add_argument("--dispatch-epoch", type=int, default=int(time.time()))
     start_parser.set_defaults(func=start)
 
