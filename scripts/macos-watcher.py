@@ -210,6 +210,7 @@ def start(args: argparse.Namespace) -> int:
         "KeepAlive": False,
         "ProcessType": "Background",
         "ThrottleInterval": 10,
+        "AbandonProcessGroup": True,
         "StandardOutPath": str(stdout_path),
         "StandardErrorPath": str(stderr_path),
         "EnvironmentVariables": {
