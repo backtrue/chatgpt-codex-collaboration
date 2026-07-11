@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 
 TASK_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -143,6 +144,7 @@ def start(args: argparse.Namespace) -> int:
         print("error=codex_not_found", file=sys.stderr)
         return 2
 
+    generation_id = f"{args.dispatch_epoch}-{uuid.uuid4()}"
     label, plist, stdout_path, stderr_path, transport_path, config_path = paths(
         args.task_id
     )
@@ -167,8 +169,6 @@ def start(args: argparse.Namespace) -> int:
         return 2
 
     unload(label, plist)
-    # Preserve transport events. The supervisor filters them by dispatch_epoch,
-    # preventing a fast post-dispatch terminal event from being deleted here.
     for path in (stdout_path, stderr_path):
         try:
             path.unlink()
@@ -182,6 +182,7 @@ def start(args: argparse.Namespace) -> int:
         args.branch,
         args.base_sha,
         thread_id,
+        generation_id,
         "--repo",
         str(repo),
         "--remote",
@@ -224,8 +225,9 @@ def start(args: argparse.Namespace) -> int:
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "task_id": args.task_id,
+                "generation_id": generation_id,
                 "thread_id": thread_id,
                 "repo": str(repo),
                 "remote": args.remote,
@@ -257,8 +259,9 @@ def start(args: argparse.Namespace) -> int:
     run("launchctl", "kickstart", "-k", f"{domain()}/{label}")
     print(
         f"event=event_supervisor_started task_id={args.task_id} "
-        f"thread_id={thread_id} label={label} branch={args.branch} "
-        f"goal_status=paused wake_mode=codex_exec_resume plist={plist}"
+        f"generation_id={generation_id} thread_id={thread_id} label={label} "
+        f"branch={args.branch} goal_status=paused "
+        f"wake_mode=codex_exec_resume plist={plist}"
     )
     print(
         "instruction=end_current_turn_no_await "
