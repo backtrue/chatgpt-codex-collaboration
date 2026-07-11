@@ -1,4 +1,4 @@
-schema_version: "3.1"
+schema_version: "4.0"
 
 target:
   operating_system: "macOS"
@@ -13,16 +13,23 @@ target:
 
 native_goal_policy:
   task_blocker_may_mutate_native_goal: false
-  automatic_goal_pause: false
+  task_failure_may_replace_goal: false
   automatic_goal_clear: false
-  replace_goal_on_task_failure: false
   minimum_repeated_native_goal_turns_before_blocked: 3
   require_no_executor_fallback_before_blocked: true
   require_complete_goal_blocker_before_blocked: true
+  transport_wait_suspension:
+    authorized: true
+    status_during_wait: "paused"
+    preserve_goal_id: true
+    preserve_objective: true
+    resume_same_goal_on_event: true
+    controller: "codex app-server thread/goal/set"
+    purpose: "Prevent native goal continuation turns while waiting for an external ChatGPT handoff."
   recovery_from_legacy_blocked_or_paused:
     preserve_goal_id: true
     preserve_objective: true
-    require_authorized_resume: true
+    resume_same_goal: true
     rerun_capability_handshake: true
 
 required:
@@ -32,23 +39,34 @@ required:
       purpose: "Run thin POSIX-compatible script entrypoints."
     python3:
       minimum_version: "3.9"
-      purpose: "Run orchestration, state, watcher, event, and validation logic."
+      purpose: "Run orchestration, state, watcher, event, wake, and validation logic."
     git:
       minimum_version: "2.30"
-      purpose: "Inspect repositories, compare commits, and verify handoff branches."
+      purpose: "Create and verify remote handoff branches and inspect candidate commits."
+    codex:
+      purpose: "Expose app-server goal control and non-interactive session resume."
+      required_subcommands:
+        - "app-server"
+        - "exec resume"
     xcode-select:
       purpose: "Verify Xcode Command Line Tools are configured."
     launchctl:
-      purpose: "Run handoff watchers as per-user LaunchAgents."
+      purpose: "Run event supervisors as per-user LaunchAgents."
     osascript:
-      purpose: "Support macOS ChatGPT transport adapters."
+      purpose: "Provide a macOS notification fallback when automatic Codex resume fails."
     open:
       purpose: "Open the approved ChatGPT conversation surface."
 
   verifier_capabilities:
-    codex_goal_tools:
-      description: "Expose get_goal, create_goal, and update_goal for the current Codex thread. BLOCKED_GOAL is task-local and must not mutate native goal status."
-      missing_behavior: "BLOCKED_GOAL"
+    codex_thread_id:
+      description: "Shell commands receive CODEX_THREAD_ID for the current persisted session."
+      missing_behavior: "BLOCKED_CAPABILITY"
+    codex_goal_control:
+      description: "Use app-server thread/goal/get and thread/goal/set without invoking a model."
+      missing_behavior: "BLOCKED_CAPABILITY"
+    codex_session_resume:
+      description: "Use codex exec resume to continue the same thread after a watcher event."
+      missing_behavior: "notify_only"
     chatgpt_conversation_access:
       description: "Open, inspect, and send messages to the approved ChatGPT conversation."
       missing_behavior: "BLOCKED_TRANSPORT"
@@ -56,10 +74,10 @@ required:
       description: "Codex can read the complete repository locally."
       missing_behavior: "BLOCKED_CAPABILITY"
     local_command_execution:
-      description: "Codex can run the required acceptance commands locally."
+      description: "Codex can run required acceptance commands locally."
       missing_behavior: "BLOCKED_CAPABILITY"
-    github_read:
-      description: "Codex can fetch and inspect the assigned remote branch."
+    github_read_write:
+      description: "Codex can create the remote handoff branch and fetch its candidate commit."
       missing_behavior: "BLOCKED_TRANSPORT"
 
   implementer_minimum_capabilities:
@@ -76,6 +94,7 @@ required:
 
   contracts:
     collaboration: "contracts/collaboration.schema.json"
+    handoff_receipt: "contracts/handoff-receipt.schema.json"
 
 executor_profiles:
   local_full:
@@ -88,6 +107,7 @@ executor_profiles:
     description: "ChatGPT can edit and commit through GitHub connector but has no local shell or test runner."
     implementation_validation_policy: "deferred_to_codex"
     candidate_commit_without_tests: true
+    require_precreated_remote_branch: true
     verifier_behavior: "Codex must fetch the candidate and run every required acceptance command locally before acceptance."
 
   read_only:
@@ -118,12 +138,9 @@ optional:
       purpose: "Install or update local macOS tooling."
 
   capabilities:
-    codex_goal_ui_control:
-      purpose: "Allow authorized /goal resume, pause, edit, or clear operations."
-      fallback: "Report one required user action without mutating the native goal automatically."
     github_webhook:
       purpose: "Wake the verifier when the assigned branch changes."
-      fallback: "macOS launchd branch watcher"
+      fallback: "macOS launchd event supervisor"
     browser_preview:
       purpose: "Verify frontend behavior on required viewports."
       fallback: "BLOCKED_CAPABILITY when browser verification is required"
