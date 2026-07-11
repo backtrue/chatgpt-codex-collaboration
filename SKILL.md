@@ -73,7 +73,7 @@ This temporary pause:
 - must be paired with event-driven resume of the same `CODEX_THREAD_ID`;
 - must not be used to hide a task blocker.
 
-The event supervisor reactivates the same goal and runs `codex exec resume <thread-id> <prompt>` only after a terminal Git or transport event.
+The event supervisor launches `codex exec resume` while the goal is still paused. The wake controller waits for the explicit resumed `turn.started` event, then reactivates the same goal. This prevents an idle continuation from racing ahead of the event prompt.
 
 ## 2. macOS Environment Gate
 
@@ -311,13 +311,14 @@ sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
 `start` performs these actions atomically:
 
 1. verifies or creates the remote branch at the exact base SHA;
-2. reads `CODEX_THREAD_ID`;
-3. temporarily pauses the same native goal through `codex app-server`;
-4. starts a per-task launchd event supervisor;
-5. records the wake configuration;
-6. returns immediately so the current turn can end.
+2. reads the saved executor profile;
+3. reads `CODEX_THREAD_ID`;
+4. temporarily pauses the same native goal through `codex app-server`;
+5. starts a per-task launchd event supervisor with a unique generation ID;
+6. records the wake configuration;
+7. returns immediately so the current turn can end.
 
-Do not run blocking `await`. The `await` command is intentionally disabled because the execution platform may force a 300-second timeout and create continuation loops.
+Do not run blocking `await`. The command is intentionally disabled because the execution platform may force a 300-second timeout and create continuation loops.
 
 During the external wait:
 
@@ -325,7 +326,8 @@ During the external wait:
 - no Codex model turn remains active;
 - Git polling starts at 60 seconds and backs off to 300 seconds;
 - local ChatGPT transport events are monitored;
-- no LLM is invoked.
+- no LLM is invoked;
+- default fallback wake is 30 minutes for `github_connector` and 2 hours for `local_full`.
 
 Terminal events:
 
@@ -340,11 +342,13 @@ Terminal events:
 
 On a terminal event, the supervisor:
 
-1. reactivates the same native goal;
-2. runs `codex exec --json resume <CODEX_THREAD_ID> <event prompt>`;
-3. resumes the same persisted session and task;
-4. logs the resumed run;
-5. pauses the goal again and sends a macOS notification if automatic resume fails.
+1. launches `codex exec --json resume <CODEX_THREAD_ID> <event prompt>` while the goal remains paused;
+2. waits for the explicit `turn.started` event;
+3. reactivates the same native goal;
+4. resumes the same persisted session and task;
+5. logs the resumed run;
+6. cleans only the matching supervisor generation;
+7. leaves the goal paused and sends a macOS notification if automatic resume fails.
 
 ## 11. Transport Adapter Responsibilities
 
@@ -389,6 +393,14 @@ Treat it as protocol failure, not an active wait.
 ### `conversation_failed`, `transport_unreachable`, or `mode_drifted`
 
 Transition the collaboration task to `BLOCKED_TRANSPORT`, preserve evidence, and keep the same native goal identity.
+
+### `observation_lease_expired`
+
+Inspect the approved ChatGPT conversation once:
+
+- if generation is still active, start a new event-driven suspension without status prose;
+- if the response completed without a valid commit, emit protocol failure and require a commit;
+- if the UI is inaccessible, enter `BLOCKED_TRANSPORT`.
 
 ## 13. GitHub Handoff Gate
 
