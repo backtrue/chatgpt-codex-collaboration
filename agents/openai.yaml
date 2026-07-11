@@ -1,4 +1,0 @@
-interface:
-  display_name: "ChatGPT-Codex macOS 協作驗收"
-  short_description: "讓 ChatGPT 實作、Codex 事件到達後才恢復驗收"
-  default_prompt: "依照 macOS-first 協作流程，先執行 Mac Doctor、綁定原生 /goal、完成 capability handshake，並在派工前建立及驗證遠端 handoff branch。依 local_full 或 github_connector profile 建立 Task Contract；ChatGPT 只有在回傳非空 commit SHA 時才能宣告 completed。派工後使用 event-driven macOS supervisor：暫停同一個 native goal、結束目前 turn，直到 Git branch 或 transport terminal event 出現，再以 codex exec resume 恢復同一個 CODEX_THREAD_ID。若 resumed turn 結束時 task 仍為 BLOCKED_TRANSPORT、BLOCKED_CAPABILITY、BLOCKED_OBSERVATION 或其他穩定 blocker，必須立即 quiesce 同一 goal，禁止輸出重複的『狀態未變』訊息、禁止再次 continuation；禁止使用 blocking await。"
