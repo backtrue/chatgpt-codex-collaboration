@@ -350,6 +350,15 @@ On a terminal event, the supervisor:
 6. cleans only the matching supervisor generation;
 7. leaves the goal paused and sends a macOS notification if automatic resume fails.
 
+The resumed Codex turn has a transport guard: it must not run `screencapture`, inspect
+ChatGPT screenshots, control ChatGPT with `osascript`, or send another repair/status
+prompt. It may read only persisted task state, local transport events, the remote
+branch, and authoritative specifications. The wake controller creates an in-flight
+marker before starting the resume and rejects another resume while that marker is
+active. A resume that does not finish within the bounded 300-second window is
+terminated, the same goal is left paused, and the original event is preserved for
+manual recovery after new evidence appears.
+
 ## 11. Transport Adapter Responsibilities
 
 When the ChatGPT response reaches a terminal condition, the transport adapter must emit a local event.

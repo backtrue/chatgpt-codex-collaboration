@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -264,6 +265,83 @@ def mark_processed(
     os.replace(temp, path)
 
 
+def inflight_marker(task_id: str) -> Path:
+    return wake_root() / f"{safe_task_id(task_id)}.in-flight.json"
+
+
+def read_inflight_marker(task_id: str) -> dict[str, Any] | None:
+    path = inflight_marker(task_id)
+    if not path.exists():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def process_is_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def acquire_inflight_marker(
+    task_id: str,
+    fingerprint: str,
+    event_name: str,
+    event_id: str,
+) -> bool:
+    path = inflight_marker(task_id)
+    payload = {
+        "task_id": task_id,
+        "fingerprint": fingerprint,
+        "event_type": event_name,
+        "event_id": event_id,
+        "pid": os.getpid(),
+        "started_at_epoch": int(time.time()),
+    }
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = read_inflight_marker(task_id)
+        if existing and process_is_alive(existing.get("pid")):
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return True
+
+
+def clear_inflight_marker(task_id: str, fingerprint: str) -> None:
+    path = inflight_marker(task_id)
+    marker = read_inflight_marker(task_id)
+    if not marker or marker.get("fingerprint") != fingerprint:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def write_quiescent_marker(
     task_id: str,
     fingerprint: str,
@@ -316,8 +394,13 @@ def main() -> int:
     parser.add_argument("--skill-root", required=True)
     parser.add_argument("--candidate-sha")
     parser.add_argument("--event-payload", default="{}")
+    parser.add_argument("--resume-timeout-seconds", type=int, default=300)
     parser.add_argument("--codex")
     args = parser.parse_args()
+
+    if args.resume_timeout_seconds < 1:
+        print("error=invalid_resume_timeout", file=sys.stderr)
+        return 2
 
     repo = Path(args.repo).expanduser().resolve()
     skill_root = Path(args.skill_root).expanduser().resolve()
@@ -367,6 +450,18 @@ def main() -> int:
             )
             return 0
 
+        if not acquire_inflight_marker(
+            args.task_id,
+            fingerprint,
+            args.event_type,
+            args.event_id,
+        ):
+            print(
+                f"event=wake_inflight_duplicate_ignored task_id={args.task_id} "
+                f"fingerprint={fingerprint}"
+            )
+            return 0
+
         log_root = Path(
             os.environ.get("COLLAB_LOG_ROOT", "~/.codex/collaboration/logs")
         ).expanduser()
@@ -386,6 +481,8 @@ Event payload: {json.dumps(event_payload, ensure_ascii=False)}
 This is the same persisted Codex thread and native goal. The goal is temporarily paused only to prevent token-consuming continuation turns during external work. The wake controller will reactivate it after this explicit resumed turn starts. Do not create, replace, clear, block, or manually resume the goal.
 
 Read the existing task state, wake configuration, supervisor logs, transport events, remote branch, and authoritative specifications. If the event adds no new evidence and the task is already in the same stable blocked state, do not emit another user-visible status message. If the event is handoff_candidate, validate the candidate and run independent acceptance. If the event is a transport or protocol failure, execute one documented recovery path. Do not redispatch blindly and do not report completion without evidence.
+
+Transport guard: this resumed turn must not inspect or control the ChatGPT UI. Do not run screencapture, screenshot inspection, browser inspection, osascript against ChatGPT, or another repair/status prompt. Use only persisted task state, local transport events, the remote branch, and the authoritative specifications. If those sources add no new evidence, stop this turn with the existing blocker preserved.
 """
 
         started = time.time()
@@ -396,6 +493,8 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
         returncode = 2
         proc: subprocess.Popen[str] | None = None
         turn_started_count = 0
+        resume_timed_out = threading.Event()
+        timeout_timer: threading.Timer | None = None
 
         try:
             with log_path.open("a", encoding="utf-8") as log:
@@ -429,104 +528,133 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                 if proc.stdout is None:
                     raise RuntimeError("failed to capture codex exec output")
 
-                for line in proc.stdout:
-                    log.write(line)
-                    log.flush()
-                    current_event = event_type(line)
+                def stop_timed_out_resume() -> None:
+                    resume_timed_out.set()
+                    terminate_process(proc)
 
-                    if current_event == "turn.started":
-                        turn_started_count += 1
-                        if quiescent_paused and turn_started_count > 1:
-                            log.write(
-                                json.dumps(
-                                    {
-                                        "event": "unexpected_continuation_interrupted",
-                                        "task_id": args.task_id,
-                                        "condition_fingerprint": fingerprint,
-                                    }
-                                )
-                                + "\n"
-                            )
-                            log.flush()
-                            intentional_interrupt = True
-                            terminate_process(proc)
-                            break
+                timeout_timer = threading.Timer(
+                    args.resume_timeout_seconds,
+                    stop_timed_out_resume,
+                )
+                timeout_timer.daemon = True
+                timeout_timer.start()
 
-                        if not goal_reactivated:
-                            active = run_goal_control(
-                                skill_root,
-                                args.thread_id,
-                                "active",
-                                repo,
-                                codex,
-                            )
-                            log.write(
-                                json.dumps(
-                                    {
-                                        "event": "native_goal_reactivation",
-                                        "task_id": args.task_id,
-                                        "generation_id": args.generation_id,
-                                        "returncode": active.returncode,
-                                        "detail": (
-                                            active.stdout.strip()
-                                            if active.returncode == 0
-                                            else (active.stderr or active.stdout).strip()
-                                        )[-2000:],
-                                    }
+                try:
+                    for line in proc.stdout:
+                        log.write(line)
+                        log.flush()
+                        current_event = event_type(line)
+
+                        if current_event == "turn.started":
+                            turn_started_count += 1
+                            if quiescent_paused and turn_started_count > 1:
+                                log.write(
+                                    json.dumps(
+                                        {
+                                            "event": "unexpected_continuation_interrupted",
+                                            "task_id": args.task_id,
+                                            "condition_fingerprint": fingerprint,
+                                        }
+                                    )
+                                    + "\n"
                                 )
-                                + "\n"
-                            )
-                            log.flush()
-                            if active.returncode != 0:
+                                log.flush()
+                                intentional_interrupt = True
                                 terminate_process(proc)
-                                raise RuntimeError("native goal reactivation failed")
-                            goal_reactivated = True
+                                break
 
-                    if current_event == "turn.completed" and goal_reactivated:
-                        quiesce, state = should_quiesce(
-                            args.task_id,
-                            args.generation_id,
-                        )
-                        if quiesce and not quiescent_paused:
-                            paused = run_goal_control(
-                                skill_root,
-                                args.thread_id,
-                                "paused",
-                                repo,
-                                codex,
-                            )
-                            log.write(
-                                json.dumps(
-                                    {
-                                        "event": "native_goal_quiescent_pause",
-                                        "task_id": args.task_id,
-                                        "generation_id": args.generation_id,
-                                        "task_state": state,
-                                        "returncode": paused.returncode,
-                                        "condition_fingerprint": fingerprint,
-                                        "detail": (
-                                            paused.stdout.strip()
-                                            if paused.returncode == 0
-                                            else (paused.stderr or paused.stdout).strip()
-                                        )[-2000:],
-                                    }
+                            if not goal_reactivated:
+                                active = run_goal_control(
+                                    skill_root,
+                                    args.thread_id,
+                                    "active",
+                                    repo,
+                                    codex,
                                 )
-                                + "\n"
-                            )
-                            log.flush()
-                            if paused.returncode != 0:
-                                terminate_process(proc)
-                                raise RuntimeError("native goal quiescent pause failed")
-                            quiescent_paused = True
-                            quiescent_state = state
-                            write_quiescent_marker(
+                                log.write(
+                                    json.dumps(
+                                        {
+                                            "event": "native_goal_reactivation",
+                                            "task_id": args.task_id,
+                                            "generation_id": args.generation_id,
+                                            "returncode": active.returncode,
+                                            "detail": (
+                                                active.stdout.strip()
+                                                if active.returncode == 0
+                                                else (active.stderr or active.stdout).strip()
+                                            )[-2000:],
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                                log.flush()
+                                if active.returncode != 0:
+                                    terminate_process(proc)
+                                    raise RuntimeError("native goal reactivation failed")
+                                goal_reactivated = True
+
+                        if current_event == "turn.completed" and goal_reactivated:
+                            quiesce, state = should_quiesce(
                                 args.task_id,
-                                fingerprint,
-                                state,
-                                args.event_type,
+                                args.generation_id,
                             )
+                            if quiesce and not quiescent_paused:
+                                paused = run_goal_control(
+                                    skill_root,
+                                    args.thread_id,
+                                    "paused",
+                                    repo,
+                                    codex,
+                                )
+                                log.write(
+                                    json.dumps(
+                                        {
+                                            "event": "native_goal_quiescent_pause",
+                                            "task_id": args.task_id,
+                                            "generation_id": args.generation_id,
+                                            "task_state": state,
+                                            "returncode": paused.returncode,
+                                            "condition_fingerprint": fingerprint,
+                                            "detail": (
+                                                paused.stdout.strip()
+                                                if paused.returncode == 0
+                                                else (paused.stderr or paused.stdout).strip()
+                                            )[-2000:],
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                                log.flush()
+                                if paused.returncode != 0:
+                                    terminate_process(proc)
+                                    raise RuntimeError("native goal quiescent pause failed")
+                                quiescent_paused = True
+                                quiescent_state = state
+                                write_quiescent_marker(
+                                    args.task_id,
+                                    fingerprint,
+                                    state,
+                                    args.event_type,
+                                )
+                finally:
+                    if timeout_timer is not None:
+                        timeout_timer.cancel()
 
                 returncode = proc.wait()
+                if resume_timed_out.is_set():
+                    log.write(
+                        json.dumps(
+                            {
+                                "event": "codex_resume_timeout",
+                                "task_id": args.task_id,
+                                "generation_id": args.generation_id,
+                                "condition_fingerprint": fingerprint,
+                                "timeout_seconds": args.resume_timeout_seconds,
+                            }
+                        )
+                        + "\n"
+                    )
+                    log.flush()
                 cleaned = cleanup_generation(args.task_id, args.generation_id)
                 log.write(
                     json.dumps(
@@ -541,6 +669,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                             "quiescent_paused": quiescent_paused,
                             "quiescent_state": quiescent_state,
                             "intentional_interrupt": intentional_interrupt,
+                            "resume_timed_out": resume_timed_out.is_set(),
                             "supervisor_generation_cleaned": cleaned,
                             "duration_seconds": round(time.time() - started, 3),
                         }
@@ -551,6 +680,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
 
             success = (
                 goal_reactivated
+                and not resume_timed_out.is_set()
                 and (returncode == 0 or intentional_interrupt)
             )
             if not success:
@@ -571,7 +701,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
                     f"turn_started={str(goal_reactivated).lower()} log={log_path}",
                     file=sys.stderr,
                 )
-                return returncode or 2
+                return 2 if resume_timed_out.is_set() else (returncode or 2)
 
             final_state = str(read_task_state(args.task_id).get("state") or "unknown")
             mark_processed(
@@ -612,6 +742,7 @@ Read the existing task state, wake configuration, supervisor logs, transport eve
             print(f"error={exc} log={log_path}", file=sys.stderr)
             return 2
     finally:
+        clear_inflight_marker(args.task_id, fingerprint)
         fcntl.flock(wake_lock.fileno(), fcntl.LOCK_UN)
         wake_lock.close()
 

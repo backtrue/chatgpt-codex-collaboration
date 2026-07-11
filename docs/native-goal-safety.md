@@ -65,6 +65,12 @@ If LaunchAgent creation fails, restore the goal to `active` before returning an 
 
 If automatic Codex resume fails, return the same goal to `paused`, emit a macOS notification, and preserve the wake event so the user can retry. Do not mark the goal blocked.
 
+The resume controller must create an in-flight marker before starting `codex exec resume`.
+While that marker is active, duplicate events for the same task must not start another
+resume. The resumed turn must not inspect or control the ChatGPT UI. If the resume
+exceeds the bounded 300-second window, terminate it, leave the same goal paused, and
+preserve the original event for recovery after new evidence.
+
 ## Blocking Await Is Not a Safety Mechanism
 
 The formal workflow must not rely on a long-running shell command to keep a Codex turn active.
