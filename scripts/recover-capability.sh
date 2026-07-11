@@ -9,11 +9,17 @@ fi
 TASK_ID=$1
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-sh "$SCRIPT_DIR/macos-watcher.sh" stop "$TASK_ID" >/dev/null 2>&1 || true
+# Stop either a legacy watcher or an event supervisor. When a wake config exists,
+# restore the same native goal to active before capability reassessment.
+sh "$SCRIPT_DIR/macos-watcher.sh" stop \
+  "$TASK_ID" \
+  --resume-goal >/dev/null 2>&1 || true
+
 sh "$SCRIPT_DIR/transport-event.sh" clear "$TASK_ID" >/dev/null 2>&1 || true
+
 sh "$SCRIPT_DIR/task-state.sh" transition \
   "$TASK_ID" CAPABILITY_CHECK \
   --event capability_reassessment \
   --force
 
-echo "event=capability_recovery_ready task_id=$TASK_ID native_goal_unchanged=true"
+echo "event=capability_recovery_ready task_id=$TASK_ID native_goal_reactivated_if_configured=true"
