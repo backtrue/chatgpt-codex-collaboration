@@ -2,199 +2,224 @@
 
 一套 **macOS-first、以 Codex 原生 `/goal` 為上層控制權**的雙代理開發與驗收流程。
 
-ChatGPT 負責有限範圍的程式實作；Codex 負責掌握 PRD／SDD／spec、檢查 Git diff、執行驗收、退回修正，並持續推進完整目標。GitHub branch 是兩者之間正式且可稽核的交接邊界。
+ChatGPT 負責主要程式實作；Codex 負責拆出有限 task、掌握 PRD／SDD／spec、驗證 Git candidate、執行測試、退回修正，並持續推進完整目標。
 
-> 第一版只支援 macOS 13 Ventura 以上。Linux、Windows 與 WSL 暫不支援。
+GitHub remote branch 與 commit SHA 是正式交接邊界。
+
+> 目前支援 macOS 13 Ventura 以上。Linux、Windows 與 WSL 暫不支援。
 
 ---
 
-## 為什麼需要這個 Skill
+## 設計目標
 
-單一 AI 同時負責寫程式與宣布自己寫對了，常見問題包括：
+這個 Skill 的成本策略是：
 
-- 測試通過，但實作仍偏離 spec。
-- 模型完成一個局部 task，就把整體工作當成結束。
-- ChatGPT 說完成，但沒有遠端 commit 與可驗證證據。
-- 驗收失敗後，Codex 直接代替 ChatGPT 修掉，失去獨立驗收。
-- 中途斷線或重啟後，不知道任務是否已派送、是否該重送。
-- 等待 ChatGPT 時，active `/goal` 反覆產生 continuation turn，持續消耗 token。
-- Task capability blocker 被誤升級成 native goal blocked／paused，導致整體工作停止。
+```text
+大量產碼、修改、重工
+→ 交給 ChatGPT 訂閱方案中的高階模型
 
-本 Skill 將角色拆開：
+少量但必要的規格判斷、測試與驗收
+→ 交給 Codex
+```
+
+同時避免：
+
+- ChatGPT 自己寫、自己宣布驗收通過
+- ChatGPT 回覆完成，卻沒有 candidate commit
+- ChatGPT 沒有 shell，Codex 卻要求它先跑完本機測試
+- Codex 等待 ChatGPT 時反覆產生 `/goal` continuation turns
+- 長時間 shell `await` 被平台每幾分鐘切斷
+- task blocker 被誤升級成完整 native goal blocker
+- 遠端 branch 根本不存在，ChatGPT connector 無法提交
+
+---
+
+## 角色分工
 
 | 角色 | 職責 |
 |---|---|
-| **Codex `/goal`** | 保存完整目標，跨 turn 延續工作 |
-| **Codex** | 拆 task、掌握 spec、驗收、退修、判斷 goal 是否完成 |
-| **ChatGPT** | 依 Task Contract 實作、測試或建立待驗證 candidate、commit、push |
-| **GitHub** | 程式碼與驗收證據的正式交接邊界 |
-| **使用者** | 裁決未定義的產品行為與 goal 變更 |
+| **Codex `/goal`** | 保存完整目標與跨 task 連續性 |
+| **Codex** | 定義 task、掌握 spec、準備 branch、驗收、退修、判斷 goal 是否完成 |
+| **ChatGPT** | 依 profile 實作並建立 candidate commit |
+| **GitHub** | 程式碼與交接證據的正式邊界 |
+| **launchd supervisor** | 無模型地監控 Git／transport event，事件到達後恢復同一 Codex session |
+| **使用者** | 決定未定義的產品行為與明確 goal 變更 |
 
 ---
 
-## 核心原則
+## 核心不變式
 
-1. ChatGPT 不得驗收自己的實作。
-2. Codex 驗收失敗時，不得偷偷代替 ChatGPT 修正。
-3. ChatGPT 的「完成」訊息不算交付；遠端 branch 與 commit SHA 才算。
-4. 測試通過不等於 spec 通過。
-5. 單一 task 驗收通過，不等於整體 `/goal` 完成。
-6. 等待 ChatGPT 時，不使用 Codex reasoning loop 輪詢。
-7. Goal、task、branch、SHA 與驗收結果都必須可持久化與恢復。
-8. **Task blocked 不等於 native goal blocked。**
-9. Skill 不得自動執行 `/goal pause`、`/goal clear` 或因 task failure 呼叫 `update_goal(blocked)`。
-
----
-
-## Native Goal Safety
-
-Native goal 與 collaboration task 是兩套不同的 state machine。
-
-以下都只是 task-local 狀態：
-
-```text
-CAPABILITY_CHECK
-WAITING_HANDOFF
-BLOCKED_CAPABILITY
-BLOCKED_TRANSPORT
-BLOCKED_OBSERVATION
-BLOCKED_SPEC
-BLOCKED_USER
-REPAIR_REQUIRED
-```
-
-進入這些狀態時，native `/goal` 應保持原狀。尤其是：
-
-```text
-ChatGPT 沒有本機 checkout／shell
-＋
-仍可透過 GitHub connector 建立 commit
-```
-
-正確處理是：
-
-```text
-停止舊 watcher
-→ task 回到 CAPABILITY_CHECK
-→ 重新 handshake
-→ 選 github_connector
-→ ChatGPT 建立未測試 candidate
-→ Codex 本機驗證
-```
-
-不是：
-
-```text
-update_goal(blocked)
-或
-/goal pause
-```
-
-Native goal 只有在同一個「完整目標 blocker」跨至少三個 native goal turns 持續存在、且沒有 executor fallback、transport fallback、repair 或本機驗證路徑時，才可標成 blocked。
-
-詳見 [`docs/native-goal-safety.md`](docs/native-goal-safety.md)。
+1. ChatGPT 不得驗收自己的實作
+2. Codex 驗收失敗時，不得偷偷代替 ChatGPT 修正
+3. 遠端 commit SHA 不存在，就沒有完成 handoff
+4. 測試通過不等於 spec 通過
+5. 單一 task 通過不等於完整 `/goal` 完成
+6. Task blocked 不等於 native goal blocked
+7. 外部等待期間不得產生重複 Codex reasoning turns
+8. Goal、task、executor profile、branch、SHA 與驗收證據都必須可恢復
 
 ---
 
 ## 架構
 
 ```text
-Native Codex thread goal (/goal)
+Native Codex /goal
   │
-  │ objective / status / budget / continuation
   ▼
-Codex verifier & orchestrator on macOS
-  ├─ Goal Gate and Native Goal Safety
-  ├─ Mac Doctor and repository preflight
-  ├─ ChatGPT capability handshake
-  ├─ Control Plane: approved ChatGPT conversation
-  ├─ State Store: ~/.codex/collaboration/tasks/*.json
-  ├─ launchd Git watcher
-  ├─ blocking local await
-  └─ Data Plane: assigned GitHub branch
-          ↑
-ChatGPT implementer through local_full or github_connector
+Codex verifier/orchestrator on macOS
+  ├─ Mac Doctor
+  ├─ Native Goal Gate
+  ├─ ChatGPT Capability Handshake
+  ├─ Remote Branch Preparation
+  ├─ Profile-aware Task Contract
+  ├─ Strict Handoff Receipt
+  ├─ Task State
+  ├─ launchd Event Supervisor
+  ├─ app-server goal pause / resume
+  ├─ codex exec resume <CODEX_THREAD_ID>
+  └─ Local Acceptance
+          ▲
+          │ remote branch / candidate commit
+          ▼
+ChatGPT implementer
+  ├─ local_full
+  └─ github_connector
 ```
 
 完整設計見 [`docs/architecture.md`](docs/architecture.md)。
 
 ---
 
+## 為什麼不用 blocking await
+
+舊流程嘗試讓 Codex turn 長時間阻塞在：
+
+```sh
+macos-watcher.sh await ...
+```
+
+但實際執行環境可能每數分鐘強制切斷 command。結果變成：
+
+```text
+await 被切斷
+→ active /goal 再開 continuation turn
+→ Codex 再次等待
+→ 再被切斷
+→ 重複消耗 token 與模型容量
+```
+
+新版正式流程改成：
+
+```text
+成功派工
+→ 暫停同一個 native goal
+→ 結束目前 Codex turn
+→ launchd 無模型監控 Git 與 transport event
+→ 事件到達
+→ 恢復同一個 goal
+→ codex exec resume 同一個 CODEX_THREAD_ID
+→ Codex 驗收或處理 blocker
+```
+
+`macos-watcher.sh await` 現在已停用，不能再作為正式流程。
+
+---
+
 ## Executor Profiles
 
-正式派工前，ChatGPT 必須先回傳 capability handshake。
+正式派工前，ChatGPT 必須回傳 capability handshake。
 
-| Profile | ChatGPT 行為 | Codex 行為 |
-|---|---|---|
-| `local_full` | 本機修改、focused checks、commit、push | 重跑驗收 |
-| `github_connector` | 透過 connector 修改並建立 candidate，測試可 `not_run` | 本機跑完整驗收 |
-| `read_only` | 無法建立 candidate | Task `BLOCKED_CAPABILITY`，goal 不變 |
-| `none` | 無可用 executor | Task `BLOCKED_CAPABILITY`，goal 不變 |
+| Profile | ChatGPT 能力 | ChatGPT 責任 | Codex 責任 |
+|---|---|---|---|
+| `local_full` | 本機 checkout、shell、commit、push | 實作並跑 focused checks | 重跑並獨立驗收 |
+| `github_connector` | GitHub read/write/commit/push，沒有本機 shell | 建立未測試 candidate，測試回 `not_run` | 本機執行全部驗收 |
+| `read_only` | 只能讀 | 無法交件 | Task `BLOCKED_CAPABILITY` |
+| `none` | 無 repository executor | 無法交件 | Task `BLOCKED_CAPABILITY` |
 
-在 `github_connector` 模式下，ChatGPT 沒有 shell 不是 blocker；測試責任延後到 Codex。
+`github_connector` 沒有 shell 不算 blocker，只要它能在已存在的 remote branch 建立 commit。
 
 詳見 [`docs/capability-handshake.md`](docs/capability-handshake.md)。
 
 ---
 
-## 真正的低 Token 等待
+## Strict Handoff Receipt
 
-背景 watcher 執行 `git ls-remote` 本身不會呼叫模型。真正的 token 風險是 active `/goal` 在 thread idle 時反覆啟動 continuation turn。
+ChatGPT 最後必須回傳符合 [`contracts/handoff-receipt.schema.json`](contracts/handoff-receipt.schema.json) 的 JSON receipt。
 
-修正後使用兩層等待：
+### Completed
+
+```json
+{
+  "schema_version": "1.0",
+  "task_id": "TASK-001",
+  "status": "completed",
+  "executor_profile": "github_connector",
+  "branch": "chatgpt/TASK-001",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "commit_sha": "1111111111111111111111111111111111111111",
+  "changed_files": ["src/example.ts"],
+  "test_results": [
+    {"command": "npm test", "status": "not_run", "exit_code": null}
+  ],
+  "verification_status": "pending_codex_verification",
+  "blockers": []
+}
+```
+
+### Blocked
+
+```json
+{
+  "schema_version": "1.0",
+  "task_id": "TASK-001",
+  "status": "blocked",
+  "executor_profile": "github_connector",
+  "branch": "chatgpt/TASK-001",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "commit_sha": null,
+  "changed_files": [],
+  "test_results": [],
+  "verification_status": "blocked",
+  "blockers": ["GitHub connector cannot create commits"]
+}
+```
+
+以下不算完成：
 
 ```text
-launchd watcher
-  └─ 低頻、漸進退避地監看 GitHub branch
-
-目前的 Codex turn
-  └─ 阻塞在本機 await，只讀 watcher log 與 transport event
+tests = not_run
+verification_status = pending_codex_verification
+blockers = none
+commit_sha = missing
 ```
 
-啟動 watcher：
+這會被判定為 `conversation_completed_no_commit`，不是 handoff。
+
+驗證 receipt：
 
 ```sh
-sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
-  TASK-001 chatgpt/TASK-001 <base-sha> \
-  --repo "$PWD" \
-  --remote origin \
-  --dispatch-epoch <unix-epoch>
+sh "$SKILL_ROOT/scripts/validate-handoff-receipt.sh" \
+  /path/to/receipt.json
 ```
-
-接著立即阻塞目前 turn：
-
-```sh
-sh "$SKILL_ROOT/scripts/macos-watcher.sh" await \
-  TASK-001 --timeout-seconds 7500
-```
-
-`await` 同時監看：
-
-- Git handoff candidate
-- ChatGPT terminal blocker
-- conversation completed without commit
-- transport failure
-- mode drift
-- watcher failure
-
-因此 ChatGPT 已明確表示無法交件時，Codex 不會繼續傻等 lease 到期。
 
 ---
 
 ## 支援環境
 
-- macOS 13 Ventura 以上
-- Apple Silicon `arm64` 或 Intel `x86_64`
-- Python 3.9 以上
-- Git 2.30 以上
+- macOS 13+
+- Apple Silicon 或 Intel
+- Python 3.9+
+- Git 2.30+
 - Xcode Command Line Tools
-- Codex CLI 與原生 Goal tools
-- 可連線並具有 push 權限的 GitHub remote
-- Codex 可本機讀取完整 repository 並執行驗收命令
-- Codex 可存取指定 ChatGPT 對話
-- ChatGPT 至少具有 `local_full` 或 `github_connector` profile
-
-所有 shell 檔都只是 `/bin/sh` 薄包裝，主要邏輯由 Python 執行。
+- Codex CLI，且支援：
+  - `codex app-server`
+  - `codex exec resume`
+  - native `/goal`
+- Codex shell 中可取得 `CODEX_THREAD_ID`
+- 可讀寫的 GitHub remote
+- Codex 本機完整 checkout 與 command execution
+- 可操作既有 ChatGPT conversation 的 transport adapter
+- ChatGPT 至少具有 `local_full` 或 `github_connector`
 
 ---
 
@@ -224,160 +249,270 @@ git clone \
   .agents/skills/chatgpt-codex-collaboration
 ```
 
-安裝後重新載入 Codex session。
+安裝或更新後，重新載入 Codex session。
 
 ---
 
 ## 快速開始
 
+### 1. 設定 Skill 路徑
+
 ```sh
 SKILL_ROOT="$HOME/.agents/skills/chatgpt-codex-collaboration"
+```
 
+### 2. 從 Codex shell 執行 Doctor
+
+```sh
 sh "$SKILL_ROOT/scripts/macos-doctor.sh" \
+  --strict-runtime \
   --repo "$PWD" \
   --remote origin
 ```
 
-在 Codex 中：
+### 3. 啟動 Skill
 
 ```text
 使用 chatgpt-codex-collaboration，依照目前 PRD、SDD 與 spec，
-讓 ChatGPT 分段實作，Codex 持續驗收與退修，直到整體目標完成。
+讓 ChatGPT 分段實作，Codex 獨立驗收與退修，直到完整目標完成。
 ```
 
-流程：
+### 4. Capability Handshake
+
+Skill 先確認 ChatGPT 是：
 
 ```text
-Mac Doctor
-→ Native /goal Gate
-→ ChatGPT Chat Mode Gate
-→ Create task state
-→ Capability handshake
-→ Select local_full or github_connector
-→ Dispatch profile-aware task
-→ Start watcher and blocking await
-→ Candidate or terminal transport event
-→ Codex acceptance / capability recovery
-→ Return to complete goal audit
+local_full
+或
+github_connector
+```
+
+### 5. 準備遠端 branch
+
+```sh
+sh "$SKILL_ROOT/scripts/prepare-handoff-branch.sh" \
+  "$PWD" \
+  origin \
+  chatgpt/TASK-001 \
+  <base-sha>
+```
+
+### 6. 派工並啟動 event supervisor
+
+```sh
+sh "$SKILL_ROOT/scripts/macos-watcher.sh" start \
+  TASK-001 \
+  chatgpt/TASK-001 \
+  <base-sha> \
+  --repo "$PWD" \
+  --remote origin \
+  --dispatch-epoch <unix-epoch>
+```
+
+`start` 成功後：
+
+- remote branch 已驗證
+- 同一 native goal 暫時 paused
+- LaunchAgent 已建立
+- wake config 已保存
+- 目前 Codex turn 可以結束
+
+不要執行 `await`。
+
+---
+
+## 事件驅動恢復
+
+Supervisor 監看：
+
+- remote branch HEAD
+- ChatGPT terminal event JSONL
+- observation lease
+
+事件出現後會：
+
+```text
+同一 goal → active
+同一 CODEX_THREAD_ID → codex exec resume
+同一 task → 驗收或 recovery
+```
+
+若自動 resume 失敗：
+
+- goal 回到 paused
+- 顯示 macOS notification
+- 保留 resume log
+- 允許重試同一事件
+
+檔案位置：
+
+```text
+~/Library/LaunchAgents/com.backtrue.chatgpt-codex.<task-id>.plist
+~/.codex/collaboration/tasks/<task-id>.json
+~/.codex/collaboration/events/<task-id>.jsonl
+~/.codex/collaboration/wakes/<task-id>.json
+~/.codex/collaboration/logs/<task-id>.out.log
+~/.codex/collaboration/logs/<task-id>.err.log
+~/.codex/collaboration/logs/<task-id>.codex-resume.log
 ```
 
 ---
 
-## 恢復舊版誤標 blocked／paused 的 Goal
+## Transport Events
 
-若舊版 Skill 已經把 native goal 誤標成 blocked 或 paused：
+ChatGPT transport adapter 在 terminal condition 時寫入：
 
-1. 更新 Skill：
+```sh
+sh "$SKILL_ROOT/scripts/transport-event.sh" emit \
+  TASK-001 conversation_completed_no_commit \
+  --source chatgpt-ui \
+  --reason "ChatGPT completed without a valid candidate commit"
+```
+
+支援事件：
+
+- `implementation_blocked`
+- `capability_rejected`
+- `conversation_completed_no_commit`
+- `conversation_failed`
+- `transport_unreachable`
+- `mode_drifted`
+
+有效 candidate commit 會由 Git branch movement 直接觸發，不必另寫 UI event。
+
+---
+
+## Codex Acceptance
+
+Candidate 出現後，Codex 執行：
+
+```sh
+sh "$SKILL_ROOT/scripts/validate-handoff.sh" \
+  <repo-path> \
+  <remote> \
+  <branch> \
+  <base-sha> \
+  <candidate-sha> \
+  <allowed-path>...
+```
+
+並檢查：
+
+- candidate 是目前 remote branch HEAD
+- candidate 不等於 base SHA
+- changed files 在 allowed scope
+- 沒有 secrets、壓縮檔與暫存檔
+- focused tests
+- typecheck、lint 與 regression suite
+- browser behavior（必要時）
+- spec 與 goal alignment
+
+`github_connector` 的 `not_run` 是正常輸入，但 Codex 必須本機補跑全部 acceptance。
+
+---
+
+## Native Goal Safety
+
+Task blocker 不得直接變更 native goal 為 blocked。
+
+只有完整 goal blocker：
+
+- 跨至少三個 native goal turns 重複
+- 沒有 executor／transport／repair／local verification fallback
+- 無法靠使用者或外部狀態變更推進
+
+才可以 `update_goal(status="blocked")`。
+
+External wait 的 temporary pause 只是 transport suspension，必須和 event-driven resume 配對，不能用來代表失敗。
+
+詳見 [`docs/native-goal-safety.md`](docs/native-goal-safety.md)。
+
+---
+
+## 恢復舊版卡死任務
+
+1. 更新 Skill
+2. 停止舊 watcher 並恢復同一 goal：
 
    ```sh
-   git -C "$HOME/.agents/skills/chatgpt-codex-collaboration" pull
+   sh "$SKILL_ROOT/scripts/macos-watcher.sh" stop \
+     <task-id> \
+     --resume-goal
    ```
 
-2. 保留原本 goal ID 與 objective，不建立新 goal。
-3. 在 Codex 使用原生 `/goal resume` 恢復同一目標。
-4. 找到 task ID 後執行：
+3. 執行 capability recovery：
 
    ```sh
    sh "$SKILL_ROOT/scripts/recover-capability.sh" <task-id>
    ```
 
-5. 重新執行 capability handshake。
-6. 若 GitHub connector 可 commit，改用 `github_connector` 合約繼續。
+4. 重新 handshake
+5. 驗證或建立遠端 branch
+6. 拒絕沒有 commit SHA 的舊 ChatGPT 回覆
+7. 重新派送 strict receipt contract
+8. 使用 event-driven `start`
 
-Recovery command 會：
-
-- 停止舊 watcher
-- 清除舊 terminal events
-- 保留 goal、branch、base SHA 與 task history
-- 將 task 送回 `CAPABILITY_CHECK`
-- 不修改 native goal
+不要建立替代 goal，也不要重新啟動 blocking await。
 
 ---
 
-## 狀態機
+## Repository 結構
 
 ```text
-DISCOVERING
-→ CAPABILITY_CHECK
-→ READY
-→ DISPATCHING
-→ IMPLEMENTING
-→ WAITING_HANDOFF
-→ HANDOFF_CANDIDATE
-→ VERIFYING
-→ ACCEPTED
+.
+├── SKILL.md
+├── README.md
+├── dependencies.yaml
+├── agents/openai.yaml
+├── config/
+│   ├── executor.example.yaml
+│   └── capability-handshake.example.json
+├── contracts/
+│   ├── collaboration.schema.json
+│   └── handoff-receipt.schema.json
+├── docs/
+│   ├── architecture.md
+│   ├── capability-handshake.md
+│   ├── goal-integration.md
+│   ├── native-goal-safety.md
+│   └── macos.md
+└── scripts/
+    ├── codex-goal-control.py
+    ├── event-supervisor.py
+    ├── macos-doctor.py
+    ├── macos-watcher.py
+    ├── prepare-handoff-branch.py
+    ├── task-state.py
+    ├── transport-event.py
+    ├── validate-handoff-receipt.py
+    ├── validate-handoff.py
+    └── wake-codex.py
 ```
-
-退修：
-
-```text
-VERIFYING
-→ REPAIR_REQUIRED
-→ WAITING_REPAIR
-→ HANDOFF_CANDIDATE
-→ VERIFYING
-```
-
-Task-local blocked states 不得直接改變 native goal status。
-
----
-
-## Handoff 驗證
-
-```sh
-sh "$SKILL_ROOT/scripts/validate-handoff.sh" \
-  <repo-path> <remote> <branch> <base-sha> <candidate-sha> <allowed-path>...
-```
-
-Branch 更新只代表候選交付，不代表驗收通過。
-
----
-
-## Goal 與 Task
-
-`ACCEPTED` 只代表一個有限 task 通過。
-
-只有完整 objective、PRD、SDD、spec、repository、runtime、tests、CI、browser checks 與外部狀態全部有直接證據時，才可以：
-
-```text
-update_goal(status="complete")
-```
-
-否則 goal 保持 active，繼續下一個 task。
-
----
-
-## 安全邊界
-
-預設禁止：
-
-- force-push
-- 直接寫入 base branch
-- reset 或丟棄使用者未提交修改
-- 傳送 secrets、token、`.env` 與 private key
-- 修改 allowed paths 之外的檔案
-- 未經允許安裝 package
-- ChatGPT 未 push 時，把聊天程式碼當成正式交付
-- Codex 驗收失敗後自行修補 ChatGPT 的工作
-- 等待 handoff 時反覆產生「仍在等待」goal turns
-- 因 task capability／transport blocker 自動把 native goal blocked 或 paused
 
 ---
 
 ## 目前邊界
 
-macOS orchestration core 已包含：
+本 repo 已提供：
 
-- native `/goal` 綁定與 safety policy
+- native goal 綁定與 transport suspension
 - capability handshake
-- `local_full`／`github_connector` profile
+- remote branch preparation
+- strict handoff receipt
 - persistent task state
-- Mac Doctor 與 repository preflight
-- launchd watcher 與 blocking await
-- transport terminal events
-- capability recovery
-- GitHub handoff validation
+- launchd event supervisor
+- Git／transport terminal observation
+- automatic same-session `codex exec resume`
+- independent Codex acceptance
+- recovery rules
 
-完整自動化仍需要 ChatGPT transport adapter 能開啟對話、辨識 Chat mode、發送 task，並在 terminal response 時寫入 transport event。
+仍需要 ChatGPT transport adapter 實際做到：
 
-目前為 **macOS-first experimental workflow**。建議先在測試 repository 驗證完整流程，再投入重要專案。
+1. 開啟既有對話
+2. 確認 Chat mode
+3. 發送並解析 handshake
+4. 發送 profile-aware contract
+5. 解析 strict handoff receipt
+6. 對 invalid／blocked／failed response 寫入 terminal event
+
+目前為 **macOS-first experimental workflow**。先在測試 repository 完整跑通 suspend → Git commit → same-session resume → Codex acceptance，再投入重要專案。
