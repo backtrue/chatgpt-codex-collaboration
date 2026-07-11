@@ -95,6 +95,7 @@ def launch_wake(
     skill_root: Path,
     task_id: str,
     thread_id: str,
+    generation_id: str,
     event_type: str,
     event_id: str,
     repo: Path,
@@ -107,6 +108,7 @@ def launch_wake(
         str(skill_root / "scripts" / "wake-codex.py"),
         task_id,
         thread_id,
+        generation_id,
         event_type,
         event_id,
         "--repo",
@@ -134,6 +136,7 @@ def launch_wake(
         emit(
             "wake_launch_failed",
             task_id=task_id,
+            generation_id=generation_id,
             event_id=event_id,
             detail=json.dumps(str(exc)),
         )
@@ -142,6 +145,7 @@ def launch_wake(
     emit(
         "wake_launched",
         task_id=task_id,
+        generation_id=generation_id,
         event_type=event_type,
         event_id=event_id,
         pid=proc.pid,
@@ -157,6 +161,7 @@ def main() -> int:
     parser.add_argument("branch")
     parser.add_argument("base_sha")
     parser.add_argument("thread_id")
+    parser.add_argument("generation_id")
     parser.add_argument("--repo", required=True)
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--skill-root", required=True)
@@ -194,6 +199,7 @@ def main() -> int:
         "supervisor_started",
         task_id=args.task_id,
         thread_id=args.thread_id,
+        generation_id=args.generation_id,
         branch=args.branch,
         base_sha=args.base_sha,
         dispatch_epoch=args.dispatch_epoch,
@@ -208,6 +214,7 @@ def main() -> int:
                 skill_root,
                 args.task_id,
                 args.thread_id,
+                args.generation_id,
                 "observation_lease_expired",
                 event_id,
                 repo,
@@ -227,6 +234,7 @@ def main() -> int:
                         emit(
                             "transport_terminal",
                             task_id=args.task_id,
+                            generation_id=args.generation_id,
                             event_type=event_type,
                             event_id=event_id,
                             event_epoch=event_epoch,
@@ -235,6 +243,7 @@ def main() -> int:
                             skill_root,
                             args.task_id,
                             args.thread_id,
+                            args.generation_id,
                             event_type,
                             event_id,
                             repo,
@@ -251,6 +260,7 @@ def main() -> int:
                 emit(
                     "handoff_candidate",
                     task_id=args.task_id,
+                    generation_id=args.generation_id,
                     branch=args.branch,
                     sha=head,
                 )
@@ -258,6 +268,7 @@ def main() -> int:
                     skill_root,
                     args.task_id,
                     args.thread_id,
+                    args.generation_id,
                     "handoff_candidate",
                     event_id,
                     repo,
@@ -271,6 +282,7 @@ def main() -> int:
             emit(
                 state,
                 task_id=args.task_id,
+                generation_id=args.generation_id,
                 branch=args.branch,
                 detail=json.dumps(detail, ensure_ascii=False),
                 next_poll_seconds=current_poll,
@@ -289,7 +301,11 @@ def main() -> int:
 
         time.sleep(current_poll)
 
-    emit("supervisor_interrupted", task_id=args.task_id)
+    emit(
+        "supervisor_interrupted",
+        task_id=args.task_id,
+        generation_id=args.generation_id,
+    )
     return 130
 
 
