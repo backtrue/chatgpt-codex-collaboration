@@ -91,7 +91,7 @@ def transport_event(
     )
 
 
-def wake(
+def launch_wake(
     skill_root: Path,
     task_id: str,
     thread_id: str,
@@ -120,8 +120,33 @@ def wake(
         command.extend(["--candidate-sha", candidate_sha])
     if codex:
         command.extend(["--codex", codex])
-    result = subprocess.run(command, text=True, check=False)
-    return result.returncode
+
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        emit(
+            "wake_launch_failed",
+            task_id=task_id,
+            event_id=event_id,
+            detail=json.dumps(str(exc)),
+        )
+        return 2
+
+    emit(
+        "wake_launched",
+        task_id=task_id,
+        event_type=event_type,
+        event_id=event_id,
+        pid=proc.pid,
+    )
+    return 0
 
 
 def main() -> int:
@@ -179,7 +204,7 @@ def main() -> int:
         elapsed = int(time.time()) - args.dispatch_epoch
         if elapsed >= args.lease_seconds:
             event_id = f"lease-{args.dispatch_epoch}-{args.lease_seconds}"
-            return wake(
+            return launch_wake(
                 skill_root,
                 args.task_id,
                 args.thread_id,
@@ -206,7 +231,7 @@ def main() -> int:
                             event_id=event_id,
                             event_epoch=event_epoch,
                         )
-                        return wake(
+                        return launch_wake(
                             skill_root,
                             args.task_id,
                             args.thread_id,
@@ -229,7 +254,7 @@ def main() -> int:
                     branch=args.branch,
                     sha=head,
                 )
-                return wake(
+                return launch_wake(
                     skill_root,
                     args.task_id,
                     args.thread_id,
