@@ -16,9 +16,9 @@ def notify(title: str, message: str) -> None:
     if not osascript:
         return
     script = (
-        'display notification '
+        "display notification "
         + json.dumps(message)
-        + ' with title '
+        + " with title "
         + json.dumps(title)
     )
     subprocess.run([osascript, "-e", script], capture_output=True, text=True, check=False)
@@ -50,6 +50,13 @@ def run_goal_control(
     )
 
 
+def remove_lock(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Resume the same Codex session after a collaboration event"
@@ -78,7 +85,9 @@ def main() -> int:
         os.environ.get("COLLAB_WAKE_ROOT", "~/.codex/collaboration/wakes")
     ).expanduser()
     wake_root.mkdir(parents=True, exist_ok=True)
-    safe_event = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in args.event_id)
+    safe_event = "".join(
+        ch if ch.isalnum() or ch in "._-" else "-" for ch in args.event_id
+    )
     lock_path = wake_root / f"{args.task_id}.{safe_event}.lock"
     try:
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -97,6 +106,7 @@ def main() -> int:
 
     active = run_goal_control(skill_root, args.thread_id, "active", repo, codex)
     if active.returncode != 0:
+        remove_lock(lock_path)
         detail = (active.stderr or active.stdout).strip()[-2000:]
         print(f"error=goal_resume_failed detail={detail}", file=sys.stderr)
         notify(
@@ -162,6 +172,7 @@ Read the existing task state, watcher logs, transport events, and authoritative 
 
     if result.returncode != 0:
         run_goal_control(skill_root, args.thread_id, "paused", repo, codex)
+        remove_lock(lock_path)
         notify(
             "ChatGPT-Codex resume failed",
             f"Task {args.task_id} is paused. Check {log_path} and resume manually.",
