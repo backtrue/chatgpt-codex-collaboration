@@ -30,6 +30,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def parse_epoch(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        return None
+
+
 def handle_signal(_signum: int, _frame: object) -> None:
     global stop_requested
     stop_requested = True
@@ -61,13 +71,15 @@ def remote_head(repo: Path, remote: str, branch: str) -> tuple[str, str | None, 
     return "ok", line.split()[0], ""
 
 
-def transport_event(line: str) -> tuple[str | None, str, dict[str, object]]:
+def transport_event(
+    line: str,
+) -> tuple[str | None, str, dict[str, object], float | None]:
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
-        return None, "", {}
+        return None, "", {}, None
     if not isinstance(event, dict):
-        return None, "", {}
+        return None, "", {}, None
     event_type = event.get("event_type")
     event_id = event.get("event_id")
     payload = event.get("payload")
@@ -75,6 +87,7 @@ def transport_event(line: str) -> tuple[str | None, str, dict[str, object]]:
         event_type if isinstance(event_type, str) else None,
         event_id if isinstance(event_id, str) else str(uuid.uuid4()),
         payload if isinstance(payload, dict) else {},
+        parse_epoch(event.get("timestamp")),
     )
 
 
@@ -158,6 +171,7 @@ def main() -> int:
         thread_id=args.thread_id,
         branch=args.branch,
         base_sha=args.base_sha,
+        dispatch_epoch=args.dispatch_epoch,
         started_at=now_iso(),
     )
 
@@ -181,13 +195,16 @@ def main() -> int:
             with transport_path.open("r", encoding="utf-8", errors="replace") as handle:
                 handle.seek(transport_offset)
                 for line in handle:
-                    event_type, event_id, payload = transport_event(line)
+                    event_type, event_id, payload, event_epoch = transport_event(line)
+                    if event_epoch is not None and event_epoch < args.dispatch_epoch:
+                        continue
                     if event_type in TRANSPORT_TERMINAL_EVENTS:
                         emit(
                             "transport_terminal",
                             task_id=args.task_id,
                             event_type=event_type,
                             event_id=event_id,
+                            event_epoch=event_epoch,
                         )
                         return wake(
                             skill_root,
