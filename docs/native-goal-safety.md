@@ -1,12 +1,12 @@
 # Native Goal Safety
 
-The native Codex thread goal and the collaboration task state are separate state machines.
+The native Codex thread goal and the collaboration task are separate state machines.
 
 ## Core Invariant
 
-A collaboration task state must not directly mutate the native goal status.
+A collaboration task blocker must not be promoted into a native goal blocker.
 
-The following collaboration states are task-local only:
+These states are task-local:
 
 - `CAPABILITY_CHECK`
 - `WAITING_HANDOFF`
@@ -17,61 +17,101 @@ The following collaboration states are task-local only:
 - `BLOCKED_USER`
 - `REPAIR_REQUIRED`
 
-Entering any of these states does **not** authorize:
+Entering any of them does not authorize:
 
 - `update_goal(status="blocked")`;
-- `/goal pause`;
-- `/goal clear`;
-- replacing the goal objective.
+- clearing the goal;
+- replacing the goal objective;
+- permanently pausing the goal;
+- creating repeated “still blocked” turns.
 
 ## Native Goal Blocking Rule
 
-The native goal may be marked `blocked` only when all of the following are true:
+The native goal may be marked `blocked` only when all are true:
 
-1. the same blocker has persisted across at least three consecutive native goal turns;
-2. no executor-profile downgrade, transport fallback, repair contract, or local verification path exists;
-3. no meaningful progress is possible without user input or an external-state change;
-4. the blocker applies to the complete goal rather than only to the current collaboration task;
-5. exact blocker evidence is preserved.
+1. the same blocker persists across at least three consecutive native goal turns;
+2. no executor downgrade, transport fallback, repair contract, local verification path, user action, or external-state change can make progress;
+3. the blocker prevents the complete objective, not only the current task;
+4. exact evidence is preserved.
 
-A missing ChatGPT local checkout or shell does not satisfy this rule when `github_connector` can still create a candidate commit.
+A missing ChatGPT local checkout or shell does not satisfy this rule while `github_connector` can still create a candidate commit.
 
-## Native Goal Pause Rule
+## Authorized Transport Suspension
 
-This skill must never pause the native goal automatically.
+A temporary `paused` status is allowed only as a transport suspension after a valid implementation dispatch.
 
-Pause is allowed only when:
+The suspension must satisfy every condition:
 
-- the user explicitly requests it; or
-- the environment presents an authorized user/system goal-control action and the user has explicitly approved temporary pause for the current blocker.
+1. the task is already in `WAITING_HANDOFF` or `WAITING_REPAIR`;
+2. capability handshake selected an accepted executor profile;
+3. the assigned remote branch exists and its HEAD equals the recorded base SHA;
+4. the implementation contract was successfully sent;
+5. `CODEX_THREAD_ID` is known;
+6. a launchd event supervisor is successfully installed;
+7. the supervisor is configured to reactivate the same goal and run `codex exec resume` on a terminal event;
+8. the same goal ID and objective are preserved.
 
-If a stable blocking await exists, keep the goal active and keep the current Codex turn active instead of pausing.
+This pause means only:
+
+```text
+external implementer is working
+→ no Codex model turn is required
+→ native continuation is suspended until transport evidence arrives
+```
+
+It must not be described as blocked, failed, abandoned, or waiting for user intervention.
+
+If LaunchAgent creation fails, restore the goal to `active` before returning an error.
+
+If automatic Codex resume fails, return the same goal to `paused`, emit a macOS notification, and preserve the wake event so the user can retry. Do not mark the goal blocked.
+
+## Blocking Await Is Not a Safety Mechanism
+
+The formal workflow must not rely on a long-running shell command to keep a Codex turn active.
+
+The execution platform may force command termination after several minutes. Repeated `await` calls can create:
+
+```text
+command timeout
+→ active goal continuation
+→ another waiting turn
+→ token and capacity consumption
+```
+
+Therefore `macos-watcher.sh await` is disabled in the formal workflow. Event-driven suspend and resume is required.
 
 ## Capability Fallback
 
 When implementation reports `NO_LOCAL_EXECUTOR`, `NO_SHELL`, or `NO_LOCAL_CHECKOUT`:
 
-1. stop the current Git watcher;
-2. keep the native goal active;
-3. transition the collaboration task to `CAPABILITY_CHECK`;
+1. stop any stale supervisor;
+2. reactivate the same goal if it is temporarily paused;
+3. transition the task to `CAPABILITY_CHECK`;
 4. rerun the handshake;
-5. when GitHub read/write/commit/push is available, choose `github_connector`;
-6. redispatch a profile-aware contract with `deferred_to_codex` validation;
-7. start a new watcher and blocking await.
+5. choose `github_connector` when remote branch read/write/commit/push remains available;
+6. prepare the remote branch at the exact base SHA;
+7. redispatch a `deferred_to_codex` contract;
+8. begin a new event-driven suspension.
 
-Only enter `BLOCKED_CAPABILITY` when no profile can create a candidate commit.
+Only enter `BLOCKED_CAPABILITY` when no accepted profile can create a candidate commit.
 
-## Recovery from an Incorrect Terminal Goal
+## Invalid Completion Receipt
 
-If an older workflow incorrectly changed the native goal to `blocked` or `paused`:
+A response with all tests `not_run` and `verification_status=pending_codex_verification` is valid only when it also contains a real remote candidate commit SHA.
 
-1. preserve the current goal ID and objective;
-2. use the native goal UI/control to resume the same goal;
-3. do not create a replacement goal;
-4. stop any stale watcher;
-5. migrate and load the existing collaboration task state;
-6. transition the task to `CAPABILITY_CHECK`;
-7. run a new capability handshake;
-8. continue with the selected profile.
+Without a commit SHA, the response is `conversation_completed_no_commit`, not a handoff and not a reason to keep waiting indefinitely.
 
-If the goal objective was also changed, require the user to confirm the authoritative objective before resuming.
+## Recovery from Older Incorrect State
+
+When an older workflow left the same native goal blocked or paused:
+
+1. preserve the goal ID and objective;
+2. stop stale blocking-await LaunchAgents;
+3. reactivate the same goal once;
+4. load and migrate the existing task state;
+5. rerun capability handshake;
+6. verify or create the remote handoff branch at base SHA;
+7. redispatch the profile-aware contract;
+8. use event-driven suspension.
+
+Do not create a replacement goal.
