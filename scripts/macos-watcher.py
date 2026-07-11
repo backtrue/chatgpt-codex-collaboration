@@ -14,6 +14,11 @@ import time
 import uuid
 
 TASK_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+EXECUTOR_PROFILES = {"local_full", "github_connector"}
+DEFAULT_LEASE_SECONDS = {
+    "local_full": 7200,
+    "github_connector": 1800,
+}
 
 
 def event_root() -> Path:
@@ -30,6 +35,27 @@ def wake_root() -> Path:
     ).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def state_root() -> Path:
+    return Path(
+        os.environ.get("COLLAB_STATE_ROOT", "~/.codex/collaboration/tasks")
+    ).expanduser()
+
+
+def task_executor_profile(task_id: str) -> str | None:
+    path = state_root() / f"{task_id}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    executor = data.get("executor")
+    if not isinstance(executor, dict):
+        return None
+    profile = executor.get("executor_profile")
+    return profile if profile in EXECUTOR_PROFILES else None
 
 
 def paths(task_id: str) -> tuple[str, Path, Path, Path, Path, Path]:
@@ -135,6 +161,23 @@ def start(args: argparse.Namespace) -> int:
         print("error=missing_codex_thread_id", file=sys.stderr)
         return 2
 
+    executor_profile = args.executor_profile or task_executor_profile(args.task_id)
+    if executor_profile not in EXECUTOR_PROFILES:
+        print(
+            "error=missing_executor_profile "
+            "detail=Run capability handshake and persist local_full or github_connector before starting.",
+            file=sys.stderr,
+        )
+        return 2
+    lease_seconds = (
+        args.lease_seconds
+        if args.lease_seconds is not None
+        else DEFAULT_LEASE_SECONDS[executor_profile]
+    )
+    if lease_seconds < 1:
+        print("error=invalid_lease_seconds", file=sys.stderr)
+        return 2
+
     repo = Path(args.repo).expanduser().resolve()
     skill_root = Path(__file__).resolve().parent.parent
     supervisor = skill_root / "scripts" / "event-supervisor.py"
@@ -192,7 +235,7 @@ def start(args: argparse.Namespace) -> int:
         "--transport-events",
         str(transport_path),
         "--lease-seconds",
-        str(args.lease_seconds),
+        str(lease_seconds),
         "--poll-seconds",
         str(args.poll_seconds),
         "--max-poll-seconds",
@@ -225,15 +268,17 @@ def start(args: argparse.Namespace) -> int:
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": "1.1",
+                "schema_version": "1.2",
                 "task_id": args.task_id,
                 "generation_id": generation_id,
                 "thread_id": thread_id,
+                "executor_profile": executor_profile,
                 "repo": str(repo),
                 "remote": args.remote,
                 "branch": args.branch,
                 "base_sha": args.base_sha,
                 "dispatch_epoch": args.dispatch_epoch,
+                "lease_seconds": lease_seconds,
                 "skill_root": str(skill_root),
                 "codex": codex,
                 "goal_status_during_wait": "paused",
@@ -260,6 +305,7 @@ def start(args: argparse.Namespace) -> int:
     print(
         f"event=event_supervisor_started task_id={args.task_id} "
         f"generation_id={generation_id} thread_id={thread_id} label={label} "
+        f"executor_profile={executor_profile} lease_seconds={lease_seconds} "
         f"branch={args.branch} goal_status=paused "
         f"wake_mode=codex_exec_resume plist={plist}"
     )
@@ -343,9 +389,13 @@ def main() -> int:
     start_parser.add_argument("base_sha")
     start_parser.add_argument("--repo", required=True)
     start_parser.add_argument("--remote", default="origin")
+    start_parser.add_argument(
+        "--executor-profile",
+        choices=sorted(EXECUTOR_PROFILES),
+    )
     start_parser.add_argument("--thread-id")
     start_parser.add_argument("--codex")
-    start_parser.add_argument("--lease-seconds", type=int, default=7200)
+    start_parser.add_argument("--lease-seconds", type=int)
     start_parser.add_argument("--poll-seconds", type=int, default=60)
     start_parser.add_argument("--max-poll-seconds", type=int, default=300)
     start_parser.add_argument("--dispatch-epoch", type=int, default=int(time.time()))
