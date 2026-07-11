@@ -1,4 +1,4 @@
-schema_version: "4.0"
+schema_version: "4.1"
 
 target:
   operating_system: "macOS"
@@ -34,10 +34,12 @@ implementer:
   local_full:
     implementation_validation_policy: "implementer_required"
     candidate_commit_without_tests: false
+    default_observation_lease_seconds: 7200
   github_connector:
     implementation_validation_policy: "deferred_to_codex"
     candidate_commit_without_tests: true
     require_precreated_remote_branch: true
+    default_observation_lease_seconds: 1800
   handoff_receipt:
     schema: "contracts/handoff-receipt.schema.json"
     completed_requires_commit_sha: true
@@ -74,7 +76,6 @@ watcher:
   resume_command: "codex exec resume"
   thread_id_source: "CODEX_THREAD_ID"
   blocking_await_enabled: false
-  lease_seconds: 7200
   initial_poll_seconds: 60
   max_poll_seconds: 300
   backoff_after_unchanged_polls: 5
@@ -82,6 +83,7 @@ watcher:
   resume_on_handoff_candidate: true
   resume_on_observation_lease_expiry: true
   fallback_on_resume_failure: "pause_goal_and_notify"
+  generation_isolation: true
   absolute_deadline_seconds: 21600
 
 paths:
