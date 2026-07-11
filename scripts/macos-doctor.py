@@ -75,7 +75,7 @@ def main() -> int:
     parser.add_argument(
         "--strict-runtime",
         action="store_true",
-        help="Require CODEX_THREAD_ID and declared ChatGPT runtime capabilities.",
+        help="Require CODEX_THREAD_ID in addition to event-driven Codex CLI features.",
     )
     args = parser.parse_args()
 
@@ -246,9 +246,11 @@ def main() -> int:
             )
         )
 
+    # These declarations are advisory only. The capability handshake is the
+    # source of truth for ChatGPT transport and executor capabilities.
     runtime_vars = {
-        "chatgpt_transport": os.environ.get("COLLAB_CHATGPT_TRANSPORT"),
-        "chatgpt_executor": os.environ.get("COLLAB_CHATGPT_EXECUTOR"),
+        "chatgpt_transport_declaration": os.environ.get("COLLAB_CHATGPT_TRANSPORT"),
+        "chatgpt_executor_declaration": os.environ.get("COLLAB_CHATGPT_EXECUTOR"),
     }
     for name, value in runtime_vars.items():
         available = value in {"1", "true", "available", "yes"}
@@ -257,8 +259,8 @@ def main() -> int:
                 name,
                 available,
                 f"declaration={value or 'unset'}",
-                required=args.strict_runtime,
-                remediation=f"Declare {name} only after the runtime actually provides it.",
+                required=False,
+                remediation="Use capability handshake as the authoritative runtime check.",
             )
         )
 
