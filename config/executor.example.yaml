@@ -1,4 +1,4 @@
-schema_version: "3.0"
+schema_version: "4.0"
 
 target:
   operating_system: "macOS"
@@ -11,6 +11,7 @@ verifier:
   shell_command: "/bin/sh"
   require_local_checkout: true
   require_command_execution: true
+  require_codex_thread_id: true
 
 repository:
   remote: "origin"
@@ -19,6 +20,8 @@ repository:
   allow_existing_checkout: true
   require_clean_worktree: true
   prefer_git_worktree: true
+  require_remote_handoff_branch_before_dispatch: true
+  require_remote_branch_head_equals_base_sha: true
 
 implementer:
   capability_handshake_required: true
@@ -34,6 +37,12 @@ implementer:
   github_connector:
     implementation_validation_policy: "deferred_to_codex"
     candidate_commit_without_tests: true
+    require_precreated_remote_branch: true
+  handoff_receipt:
+    schema: "contracts/handoff-receipt.schema.json"
+    completed_requires_commit_sha: true
+    completed_requires_changed_files: true
+    blocked_requires_nonempty_blockers: true
 
 restrictions:
   allow_force_push: false
@@ -60,18 +69,23 @@ transport:
 watcher:
   supervisor: "launchd"
   launch_agent_directory: "~/Library/LaunchAgents"
+  wait_strategy: "event_driven_resume"
+  suspend_native_goal_during_wait: true
+  resume_command: "codex exec resume"
+  thread_id_source: "CODEX_THREAD_ID"
+  blocking_await_enabled: false
   lease_seconds: 7200
   initial_poll_seconds: 60
   max_poll_seconds: 300
   backoff_after_unchanged_polls: 5
-  local_await_poll_seconds: 5
-  local_await_health_check_seconds: 30
-  local_await_timeout_seconds: 7500
-  keep_codex_turn_active_while_waiting: true
   stop_on_transport_terminal_event: true
+  resume_on_handoff_candidate: true
+  resume_on_observation_lease_expiry: true
+  fallback_on_resume_failure: "pause_goal_and_notify"
   absolute_deadline_seconds: 21600
 
 paths:
   task_state_root: "~/.codex/collaboration/tasks"
   event_root: "~/.codex/collaboration/events"
+  wake_root: "~/.codex/collaboration/wakes"
   log_root: "~/.codex/collaboration/logs"
