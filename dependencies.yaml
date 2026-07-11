@@ -1,4 +1,4 @@
-schema_version: "4.0"
+schema_version: "4.1"
 
 target:
   operating_system: "macOS"
@@ -26,6 +26,37 @@ native_goal_policy:
     resume_same_goal_on_event: true
     controller: "codex app-server thread/goal/set"
     purpose: "Prevent native goal continuation turns while waiting for an external ChatGPT handoff."
+  post_resume_quiescence:
+    authorized: true
+    status_after_stable_blocker: "paused"
+    pause_timing: "turn.completed"
+    preserve_goal_id: true
+    preserve_objective: true
+    unchanged_status_is_noop: true
+    suppress_user_visible_duplicate_status: true
+    single_concurrent_wake_per_task: true
+    condition_fingerprint_fields:
+      - "task_id"
+      - "dispatch_id"
+      - "event_type"
+      - "candidate_sha"
+      - "event_payload"
+    stable_task_states:
+      - "BLOCKED_GOAL"
+      - "BLOCKED_SPEC"
+      - "BLOCKED_CAPABILITY"
+      - "BLOCKED_DEPENDENCY"
+      - "BLOCKED_TRANSPORT"
+      - "BLOCKED_OBSERVATION"
+      - "BLOCKED_USER"
+      - "FAILED"
+      - "CANCELLED"
+    orphaned_async_states:
+      - "DISPATCHING"
+      - "IMPLEMENTING"
+      - "WAITING_HANDOFF"
+      - "WAITING_REPAIR"
+    purpose: "Stop repeated native goal continuation turns after a resumed turn produces no actionable state change."
   recovery_from_legacy_blocked_or_paused:
     preserve_goal_id: true
     preserve_objective: true
@@ -39,7 +70,7 @@ required:
       purpose: "Run thin POSIX-compatible script entrypoints."
     python3:
       minimum_version: "3.9"
-      purpose: "Run orchestration, state, watcher, event, wake, and validation logic."
+      purpose: "Run orchestration, state, watcher, event, wake, quiescence, and validation logic."
     git:
       minimum_version: "2.30"
       purpose: "Create and verify remote handoff branches and inspect candidate commits."
